@@ -14,6 +14,7 @@ import openpi.models.pi0 as pi0
 import openpi.models.pi0_small as pi0_small
 import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
+from openpi.shared import delta_actions
 import openpi.shared.download as download
 import openpi.shared.normalize as _normalize
 import openpi.training.optimizer as _optimizer
@@ -45,6 +46,9 @@ class DataConfig:
     # Indicates where the cached dataset should be stored.
     dataset_root: str | None = dataclasses.field(default_factory=default_dataset_root)
 
+    # If true, will disable syncing the dataset from the huggingface hub. Allows training on local-only datasets.
+    local_files_only: bool = False
+
 
 class DataConfigFactory(Protocol):
     def create(self, metadata_dir: pathlib.Path, model: _model.Model) -> DataConfig:
@@ -70,6 +74,8 @@ class LeRobotAlohaDataConfig(DataConfigFactory):
     adapt_to_pi: bool = False
     # Repack transforms. Default is used if not provided.
     repack_transforms: _transforms.Group | None = None
+    # If true, will disable syncing the dataset from the huggingface hub.
+    local_files_only: bool = False
 
     def create(self, metadata_dir: pathlib.Path, model: _model.Model) -> DataConfig:
         norm_stats_path = metadata_dir / self.repo_id / "norm_stats.json"
@@ -115,6 +121,7 @@ class LeRobotAlohaDataConfig(DataConfigFactory):
                     ),
                 ]
             ),
+            local_files_only=self.local_files_only,
         )
 
 
@@ -237,6 +244,39 @@ _CONFIGS = [
         weight_loader=weight_loaders.GoogleViTWeightLoader(),
     ),
     #
+    # Example configs.
+    #
+    TrainConfig(
+        name="aloha_static_cups_open",
+        data=LeRobotAlohaDataConfig(
+            repo_id="lerobot/aloha_static_cups_open",
+            delta_action_mask=delta_actions.make_bool_mask(6, -1, 6, -1),
+            adapt_to_pi=True,
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_left_wrist": "observation.images.cam_left_wrist",
+                                "cam_right_wrist": "observation.images.cam_right_wrist",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                        }
+                    )
+                ]
+            ),
+            # Set this to true if you are using a dataset that is not on the huggingface hub.
+            local_files_only=False,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000, peak_lr=2.5e-5, decay_steps=30_000, decay_lr=2.5e-6
+        ),
+    ),
     # Debugging configs.
     #
     TrainConfig(
