@@ -1,0 +1,37 @@
+# Run with:
+# docker compose -f examples/simple_client/compose.yml up --build
+services:
+  runtime:
+    image: simple_client
+    depends_on:
+      - openpi_server
+    build:
+      context: ../..
+      dockerfile: examples/simple_client/Dockerfile
+    init: true
+    tty: true
+    network_mode: host
+    volumes:
+      - $PWD:/app
+
+  openpi_server:
+    image: openpi_server
+    build:
+      context: ../..
+      dockerfile: scripts/serve_policy.Dockerfile
+    init: true
+    tty: true
+    network_mode: host
+    volumes:
+      - $PWD:/app
+    environment:
+      - SERVER_ARGS
+
+    # Comment out this block if not running on a machine with GPUs.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
