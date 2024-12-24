@@ -54,20 +54,6 @@ While we strongly recommend fine-tuning the model to your own data to adapt it t
 
 ## Training on your own Aloha dataset
 
-OpenPI suppports training on data collected in the default aloha hdf5 format. To do so you must first convert the data to the huggingface format. We include `scripts/aloha_hd5.py` to help you do this. Once the dataset is converted, add a new `TrainConfig` to `src/openpi/training/configs.py` and replace repo id with the id assigned to your dataset during conversion.
+OpenPI suppports training on data collected in the default aloha hdf5 format using the `scripts/aloha_hd5.py` conversion script. Once the dataset is converted, add a new `TrainConfig` to `src/openpi/training/configs.py` (see the `aloha_static_cups_open` example config) and replace repo id with the id assigned to your dataset during conversion. Before training on a new dataset, you must first compute the norm stats using `scripts/compute_norm_stats.py`.
 
-```python
-TrainConfig(
-    name=<your-config-name>,
-    data=LeRobotAlohaDataConfig(
-        repo_id=<your-repo-id>,
-        delta_action_mask=[True] * 6 + [False] + [True] * 6 + [False],
-    ),
-),
-```
-
-Run the training script:
-
-```bash
-uv run scripts/train.py <your-config-name>
-```
+NOTE: When finetuning the pi0 base model on Aloha data it is recommended that you set `adapt_to_pi=True`. This maps the state and action spaces from the original aloha data to the state and action spaces of the aloha data used  to train the base model.
