@@ -29,4 +29,4 @@ RUN uv venv --python 3.7 $UV_PROJECT_ENVIRONMENT
 RUN uv pip sync /tmp/requirements.txt /tmp/openpi-client/pyproject.toml
 ENV PYTHONPATH=/app:/app/src:/app/packages/openpi-client/src
 
-CMD ["/bin/bash", "-c", "source /.venv/bin/activate && python examples/simple_client/main.py"]
+CMD /bin/bash -c "source /.venv/bin/activate && python examples/simple_client/main.py $SERVER_ARGS"

@@ -1,4 +1,5 @@
 import dataclasses
+import enum
 import logging
 import time
 
@@ -7,21 +8,32 @@ from openpi_client import websocket_client_policy as _websocket_client_policy
 import tyro
 
 
+class EnvMode(enum.Enum):
+    """Supported environments."""
+
+    ALOHA = "aloha"
+    ALOHA_SIM = "aloha_sim"
+    DROID = "droid"
+    CALVIN = "calvin"
+    LIBERO = "libero"
+
+
 @dataclasses.dataclass
 class Args:
     host: str = "0.0.0.0"
     port: int = 8000
 
-    example: str = "droid"
+    env: EnvMode = EnvMode.ALOHA_SIM
 
 
 def main(args: Args) -> None:
     obs_fn = {
-        "aloha": _random_observation_aloha,
-        "droid": _random_observation_droid,
-        "calvin": _random_observation_calvin,
-        "libero": _random_observation_libero,
-    }[args.example]
+        EnvMode.ALOHA: _random_observation_aloha,
+        EnvMode.ALOHA_SIM: _random_observation_aloha,
+        EnvMode.DROID: _random_observation_droid,
+        EnvMode.CALVIN: _random_observation_calvin,
+        EnvMode.LIBERO: _random_observation_libero,
+    }[args.env]
 
     policy = _websocket_client_policy.WebsocketClientPolicy(
         host=args.host,
