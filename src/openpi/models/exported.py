@@ -140,7 +140,13 @@ class PiModel(_model.BaseModel):
         return _example_to_obs(_make_batch(example))
 
     def norm_stats(self, processor_name: str) -> dict[str, _normalize.NormStats]:
+        """Load the norm stats from the checkpoint."""
         return _import_norm_stats(self.ckpt_dir, processor_name)
+
+    def processor_names(self) -> list[str]:
+        """List of processor names available in the checkpoint."""
+        processor_dir = self.ckpt_dir / "processors"
+        return [x.name for x in processor_dir.iterdir() if x.is_dir()]
 
     def set_module(self, module: common.BaseModule, param_path: str) -> _model.Model:
         """Creates a new model that uses the same parameters but a different module.
@@ -253,6 +259,7 @@ def _example_to_obs(example: dict) -> common.Observation:
 
 def _import_norm_stats(ckpt_dir: pathlib.Path | str, processor_name: str) -> dict[str, _normalize.NormStats]:
     ckpt_dir = pathlib.Path(ckpt_dir).resolve()
+
     path = ckpt_dir / "processors" / processor_name
     if not path.exists():
         raise FileNotFoundError(f"Processor {processor_name} not found in {ckpt_dir}")

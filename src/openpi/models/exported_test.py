@@ -33,6 +33,14 @@ def test_exported_as_pi0():
     assert diff < 10.0
 
 
+def test_processor_loading():
+    pi_model = exported.PiModel.from_checkpoint("s3://openpi-assets/exported/pi0_aloha_sim/model")
+    assert pi_model.processor_names() == ["huggingface_aloha_sim_transfer_cube"]
+
+    norm_stats = pi_model.norm_stats("huggingface_aloha_sim_transfer_cube")
+    assert sorted(norm_stats) == ["actions", "state"]
+
+
 def test_convert_to_openpi(tmp_path: pathlib.Path):
     output_dir = tmp_path / "output"
 
