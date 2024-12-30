@@ -11,7 +11,7 @@ from openpi.models import exported as _exported
 from openpi.models import model as _model
 from openpi.policies import aloha_policy
 from openpi.policies import calvin_policy
-from openpi.policies import droid_policy
+from openpi.policies import droid_policy, ur_policy
 from openpi.policies import libero_policy
 from openpi.policies import policy as _policy
 from openpi.policies import policy_config as _policy_config
@@ -28,6 +28,7 @@ class EnvMode(enum.Enum):
     DROID = "droid"
     CALVIN = "calvin"
     LIBERO = "libero"
+    UR = "ur"
 
 
 @dataclasses.dataclass
@@ -109,6 +110,10 @@ DEFAULT_EXPORTED: dict[EnvMode, Exported] = {
         dir="s3://openpi-assets/exported/pi0_libero/model",
         processor="libero",
     ),
+    EnvMode.UR: Exported(
+        dir="s3://openpi-assets/exported/pi0_base/model",
+        processor="ur5_single_24dim"
+    )
 }
 
 
@@ -222,9 +227,22 @@ def create_default_policy(
                     libero_policy.LiberoOutputs(),
                 ],
             )
+        case EnvMode.UR:
+            delta_action_mask = delta_actions.make_bool_mask(6, -1)
+
+            config = make_policy_config(
+                input_layers=[
+                    ur_policy.URInputs(action_dim=model.action_dim),
+                    transforms.ResizeImages(224,224),
+                ],
+                output_layers=[
+                    ur_policy.UROutputs(
+                        delta_action_mask=delta_action_mask,
+                        )
+                ],
+            )
         case _:
             raise ValueError(f"Unknown environment mode: {env}")
-
     return _policy_config.create_policy(config)
 
 
