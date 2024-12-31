@@ -33,6 +33,7 @@ simulation_app = app_launcher.app
 import cv2
 import h5py
 import torch
+# torch.set_printoptions(precision=3, threshold=10, edgeitems=3)
 
 import gymnasium
 import numpy as np
@@ -115,7 +116,13 @@ class URSimEnvironment(_environment.Environment):
         action = action.copy()
         action[-1] = action[-1] * 2 - 1
 
+        #####
+        # action = np.zeros(7)
+        # action[-1] = -1
+        ####
+
         action = torch.tensor(action, dtype=torch.float32)[None]
+        # print(action)
         gym_obs, reward, terminated, truncated, info = self._gym.step(action)
 
 

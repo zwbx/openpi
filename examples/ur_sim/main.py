@@ -19,7 +19,7 @@ class Args:
     task: str = "PIBussing"
     seed: int = 0
 
-    action_horizon: int = 10
+    action_horizon: int = 16
 
     host: str = "0.0.0.0"
     port: int = 8000
