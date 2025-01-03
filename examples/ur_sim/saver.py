@@ -24,7 +24,12 @@ class VideoSaver(_subscriber.Subscriber):
     def on_step(self, observation: dict, action: dict) -> None:
         img1 = observation["observation/base_0_camera/rgb/image"]
         img2 = observation["observation/wrist_0_camera/rgb/image"]
-        big_img = np.concatenate([img1, img2], axis=1)
+        # img1 = observation["observation/base_0_camera/rgb/image"]
+        # img2 = observation["observation/wrist_0_camera/rgb/image"]
+        # img3 = observation["base"][0]
+        # img4 = observation["wrist"][0]
+
+        big_img = np.concatenate([img1, img2,], axis=1)
         self._images.append(big_img)
         # im = observation["image"][0]  # [C, H, W]
         # im = np.transpose(im, (1, 2, 0))  # [H, W, C]

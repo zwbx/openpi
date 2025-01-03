@@ -23,8 +23,8 @@ sys.argv = [sys.argv[0]] + other_args # clear out sys.argv for hydra
 
 # launch omniverse app
 args_cli.enable_cameras = True
-# args_cli.headless = True
-args_cli.headless = False
+args_cli.headless = True
+# args_cli.headless = False
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
@@ -37,6 +37,8 @@ import torch
 
 import gymnasium
 import numpy as np
+np.set_printoptions(precision=3)
+
 from pathlib import Path
 from openpi_client.runtime import environment as _environment
 from typing_extensions import override
@@ -70,8 +72,9 @@ class URSimEnvironment(_environment.Environment):
         )
 
         sim_assets = {
-                "pi_scene_v2_static": DATA_PATH/"pi_scene_v2",
-                "bottle": DATA_PATH/"pi_objects/bottle",
+                # "pi_scene_v2_static": DATA_PATH/"pi_scene_v2",
+                "pi_scene_v5_static": DATA_PATH/"pi_scene_v5",
+                # "bottle": DATA_PATH/"pi_objects/bottle",
                 "plate": DATA_PATH/"pi_objects/plate",
                 "robot": DATA_PATH/"pi_robot/",
                 }
@@ -115,6 +118,7 @@ class URSimEnvironment(_environment.Environment):
         # scale gripper from [0,1] to [-1,1]
         action = action.copy()
         action[-1] = action[-1] * 2 - 1
+        print(action)
 
         #####
         # action = np.zeros(7)
@@ -132,8 +136,15 @@ class URSimEnvironment(_environment.Environment):
 
         img1 = self._last_obs["observation/base_0_camera/rgb/image"]
         img2 = self._last_obs["observation/wrist_0_camera/rgb/image"]
+        # img3 = self._last_obs["base"][0]
+        # img4 = self._last_obs["wrist"][0]
+        img3 = self._last_obs["_observation/base_0_camera/rgb/image"]
+        img4 = self._last_obs["_observation/wrist_0_camera/rgb/image"]
+        # big_img = np.concatenate([img1, img2, img3, img4], axis=1)
         big_img = np.concatenate([img1, img2], axis=1)
+        splats = np.concatenate([img3, img4], axis=1)
         cv2.imshow("big_img", cv2.cvtColor(big_img, cv2.COLOR_RGB2BGR))
+        cv2.imshow("splat", cv2.cvtColor(splats, cv2.COLOR_RGB2BGR))
         cv2.waitKey(1)
         self.step += 1
 
@@ -148,12 +159,13 @@ class URSimEnvironment(_environment.Environment):
         data["observation/base_0_camera/rgb/image"] = gym_obs["splat"]["base_cam"]
         data["observation/wrist_0_camera/rgb/image"] = gym_obs["splat"]["wrist_cam"]
 
-        # data["observation/base_0_camera/rgb/image"] = (self.file["observation/base_0_camera/rgb/image_224_224"][self.step])
-        # data["observation/wrist_0_camera/rgb/image"] = (self.file["observation/wrist_0_camera/rgb/image_224_224"][self.step])
-        # data["observation/base_0_camera/rgb/image"] = (self.file["observation/base_0_camera/rgb/image_256_320"][self.step])
-        # data["observation/wrist_0_camera/rgb/image"] = (self.file["observation/wrist_0_camera/rgb/image_256_320"][self.step])
-        # data["observation/ur5e/joints/position"] = self.file["observation/ur5e/joints/position"][self.step]
-        # data["observation/robotiq_gripper/gripper/position"] = self.file["observation/robotiq_gripper/gripper/position"][self.step]
+        data["base"] = self._gym.get_image(camera_name="base_cam")
+        data["wrist"] = self._gym.get_image(camera_name="wrist_cam")
+
+        data["_observation/base_0_camera/rgb/image"] = (self.file["observation/base_0_camera/rgb/image_224_224"][self.step])
+        data["_observation/wrist_0_camera/rgb/image"] = (self.file["observation/wrist_0_camera/rgb/image_224_224"][self.step])
+        data["_observation/ur5e/joints/position"] = self.file["observation/ur5e/joints/position"][self.step]
+        data["_observation/robotiq_gripper/gripper/position"] = self.file["observation/robotiq_gripper/gripper/position"][self.step]
         #
         # print(data["observation/ur5e/joints/position"])
 
