@@ -81,6 +81,9 @@ def maybe_download(url: str, **kwargs) -> pathlib.Path:
             _download_boto3(
                 url,
                 scratch_path,
+                boto_session=boto3.Session(
+                    region_name="us-west-1",
+                ),
                 botocore_config=botocore.config.Config(signature_version=botocore.UNSIGNED),
             )
         elif url.startswith("s3://"):
