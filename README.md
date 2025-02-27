@@ -158,6 +158,9 @@ uv run scripts/serve_policy.py policy:checkpoint --policy.config=pi0_fast_libero
 
 This will spin up a server that listens on port 8000 and waits for observations to be sent to it. We can then run the Libero evaluation script to query the server. For instructions how to install Libero and run the evaluation script, see the [Libero README](examples/libero/README.md).
 
+If you want to embed a policy server call in your own robot runtime, we have a minimal example of how to do so in the [remote inference docs](docs/remote_inference.md).
+
+
 
 ### More Examples
 
