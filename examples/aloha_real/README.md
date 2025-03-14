@@ -34,7 +34,7 @@ python -m examples.aloha_real.main
 Terminal window 2:
 
 ```bash
-roslaunch --wait aloha ros_nodes.launch
+roslaunch aloha ros_nodes.launch
 ```
 
 Terminal window 3:
