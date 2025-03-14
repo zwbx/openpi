@@ -28,7 +28,7 @@ uv pip sync examples/aloha_real/requirements.txt
 uv pip install -e packages/openpi-client
 
 # Run the robot
-python examples/aloha_real/main.py
+python -m examples.aloha_real.main
 ```
 
 Terminal window 2:
