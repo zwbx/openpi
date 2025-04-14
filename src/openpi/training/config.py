@@ -562,6 +562,20 @@ _CONFIGS = [
             ),
         ),
     ),
+    TrainConfig(
+        name="paligemma_diffusion_droid",
+        model=pi0.Pi0Config(action_horizon=10, action_dim=8),
+        data=SimpleDataConfig(
+            assets=AssetsConfig(asset_id="droid"),
+            data_transforms=lambda model: _transforms.Group(
+                inputs=[droid_policy.DroidInputs(action_dim=model.action_dim)],
+                outputs=[droid_policy.DroidOutputs()],
+            ),
+            base_config=DataConfig(
+                prompt_from_task=True,
+            ),
+        ),
+    ),
     #
     # Fine-tuning Libero configs.
     #
