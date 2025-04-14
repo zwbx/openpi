@@ -511,6 +511,20 @@ _CONFIGS = [
         ),
     ),
     TrainConfig(
+        name="paligemma_fast_droid",
+        model=pi0_fast.Pi0FASTConfig(action_dim=8, action_horizon=15),
+        data=SimpleDataConfig(
+            assets=AssetsConfig(asset_id="droid"),
+            data_transforms=lambda model: _transforms.Group(
+                inputs=[droid_policy.DroidInputs(action_dim=model.action_dim, model_type=ModelType.PI0_FAST)],
+                outputs=[droid_policy.DroidOutputs()],
+            ),
+            base_config=DataConfig(
+                prompt_from_task=True,
+            ),
+        ),
+    ),
+    TrainConfig(
         name="paligemma_fast_specialist_droid",
         model=pi0_fast.Pi0FASTConfig(action_dim=8, action_horizon=15),
         data=SimpleDataConfig(
