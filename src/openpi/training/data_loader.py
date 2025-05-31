@@ -43,6 +43,10 @@ class TransformedDataset(Dataset[T_co]):
         self._dataset = dataset
         self._transform = _transforms.compose(transforms)
 
+    def __iter__(self):
+        for sample in self._dataset:
+            yield self._transform(sample)
+
     def __getitem__(self, index: SupportsIndex) -> T_co:
         return self._transform(self._dataset[index])
 
@@ -83,6 +87,16 @@ class FakeDataset(Dataset):
 
 def create_dataset(data_config: _config.DataConfig, model_config: _model.BaseModelConfig) -> Dataset:
     """Create a dataset for training."""
+    if data_config.rlds_data_dir is not None:
+        from openpi.training.droid_rlds_dataset import DroidRldsDataset
+
+        assert data_config.batch_size > 0, "Batch size must be set for DROID data config."
+        assert data_config.rlds_data_dir is not None, "RLDS data dir must be set for DROID data config."
+        return DroidRldsDataset(
+            data_dir=data_config.rlds_data_dir,
+            batch_size=data_config.batch_size,
+        )
+
     repo_id = data_config.repo_id
     if repo_id is None:
         raise ValueError("Repo ID is not set. Cannot create dataset.")
@@ -154,7 +168,8 @@ def create_data_loader(
     dataset = create_dataset(data_config, config.model)
     dataset = transform_dataset(dataset, data_config, skip_norm_stats=skip_norm_stats)
 
-    data_loader = TorchDataLoader(
+    data_loader_cls = RLDSDataLoader if isinstance(data_config, _config.RLDSDroidDataConfig) else TorchDataLoader
+    data_loader = data_loader_cls(
         dataset,
         local_batch_size=config.batch_size // jax.process_count(),
         sharding=sharding,
@@ -273,3 +288,60 @@ def _worker_init_fn(worker_id: int) -> None:
     # means that this approach will not work for selecting the backend.
     os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
     os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
+
+
+class RLDSDataLoader:
+    """Shallow wrapper around the DROID data loader to make it compatible with openpi.
+
+    All batching already happens in the DROID dataset, so we don't need to do anything here.
+    """
+
+    def __init__(
+        self,
+        dataset,
+        local_batch_size: int,
+        *,
+        sharding: jax.sharding.Sharding | None = None,
+        shuffle: bool = False,
+        num_batches: int | None = None,
+        num_workers: int = 0,
+        seed: int = 42,
+    ):
+        self._dataset = dataset
+        self._num_batches = num_batches
+
+        assert local_batch_size == self._dataset._dataset.batch_size, (  # noqa: SLF001
+            f"Local batch size ({local_batch_size}) must match dataset batch size ({self._dataset._dataset.batch_size})."  # noqa: SLF001
+        )
+        assert shuffle == self._dataset._dataset.shuffle, (  # noqa: SLF001
+            f"Shuffle ({shuffle}) must match dataset shuffle ({self._dataset._dataset.shuffle})."  # noqa: SLF001
+        )
+        assert num_workers == 0, "RLDS data loader controls multiprocessing internally."
+        assert seed == 42, "RLDS data loader does not support setting the seed."
+
+        if jax.process_count() > 1:
+            raise NotImplementedError("Data loading with multiple processes is not supported.")
+
+        if sharding is None:
+            # Use data parallel sharding by default.
+            sharding = jax.sharding.NamedSharding(
+                jax.sharding.Mesh(jax.devices(), ("B",)),
+                jax.sharding.PartitionSpec("B"),
+            )
+
+        self._sharding = sharding
+        self._num_batches = num_batches
+
+    def __iter__(self):
+        num_items = 0
+        while True:
+            data_iter = iter(self._dataset)
+            while True:
+                if self._num_batches is not None and num_items >= self._num_batches:
+                    return
+                try:
+                    batch = next(data_iter)
+                except StopIteration:
+                    break  # We've exhausted the dataset. Create a new iterator and start over.
+                num_items += 1
+                yield jax.tree.map(lambda x: jax.make_array_from_process_local_data(self._sharding, x), batch)

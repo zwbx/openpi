@@ -36,7 +36,7 @@ class DroidInputs(transforms.DataTransformFn):
     model_type: _model.ModelType = _model.ModelType.PI0
 
     def __call__(self, data: dict) -> dict:
-        state = np.concatenate([data["observation/joint_position"], data["observation/gripper_position"]])
+        state = np.concatenate([data["observation/joint_position"], data["observation/gripper_position"]], axis=-1)
         state = transforms.pad_to_dim(state, self.action_dim)
 
         # Possibly need to parse images to uint8 (H,W,C) since LeRobot automatically
@@ -44,16 +44,19 @@ class DroidInputs(transforms.DataTransformFn):
         base_image = _parse_image(data["observation/exterior_image_1_left"])
         wrist_image = _parse_image(data["observation/wrist_image_left"])
 
+        # Construct masks, depending on whether this is training (batched) or inference (unbatched)
+        mask_true = np.ones(base_image.shape[0], dtype=np.bool_) if len(base_image.shape) == 4 else np.True_
+        mask_false = np.zeros(base_image.shape[0], dtype=np.bool_) if len(base_image.shape) == 4 else np.False_
         match self.model_type:
             case _model.ModelType.PI0:
                 names = ("base_0_rgb", "left_wrist_0_rgb", "right_wrist_0_rgb")
                 images = (base_image, wrist_image, np.zeros_like(base_image))
-                image_masks = (np.True_, np.True_, np.False_)
+                image_masks = (mask_true, mask_true, mask_false)
             case _model.ModelType.PI0_FAST:
                 names = ("base_0_rgb", "base_1_rgb", "wrist_0_rgb")
                 # We don't mask out padding images for FAST models.
                 images = (base_image, np.zeros_like(base_image), wrist_image)
-                image_masks = (np.True_, np.True_, np.True_)
+                image_masks = (mask_true, mask_true, mask_true)
             case _:
                 raise ValueError(f"Unsupported model type: {self.model_type}")
 
@@ -67,6 +70,10 @@ class DroidInputs(transforms.DataTransformFn):
             inputs["actions"] = data["actions"]
 
         if "prompt" in data:
+            if not isinstance(data["prompt"], str):
+                # If the prompt is a list of bytes, decode it.
+                assert isinstance(data["prompt"], np.ndarray), "Encoded prompts must be stored as a numpy array."
+                data["prompt"] = np.array([p.decode("utf-8") for p in data["prompt"]])
             inputs["prompt"] = data["prompt"]
 
         return inputs

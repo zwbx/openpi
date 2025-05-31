@@ -87,6 +87,10 @@ class DataConfig:
     # If true, will use the LeRobot dataset task to define the prompt.
     prompt_from_task: bool = False
 
+    # Only used for RLDS data loader (ie currently only used for DROID).
+    batch_size: int = -1
+    rlds_data_dir: str | None = None
+
 
 class GroupFactory(Protocol):
     def __call__(self, model_config: _model.BaseModelConfig) -> _transforms.Group:
@@ -317,6 +321,61 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
             repack_transforms=repack_transform,
             data_transforms=data_transforms,
             model_transforms=model_transforms,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class RLDSDroidDataConfig(DataConfigFactory):
+    """
+    Config for training on DROID, using RLDS data format (for efficient training on larger datasets).
+    """
+
+    batch_size: int = -1
+    rlds_data_dir: str | None = None
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        # No repacking needed -- RLDS data loader already outputs the correct keys.
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/exterior_image_1_left": "observation/image",
+                        "observation/wrist_image_left": "observation/wrist_image",
+                        "observation/joint_position": "observation/joint_position",
+                        "observation/gripper_position": "observation/gripper_position",
+                        "actions": "actions",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+
+        data_transforms = _transforms.Group(
+            inputs=[droid_policy.DroidInputs(action_dim=model_config.action_dim, model_type=model_config.model_type)],
+            outputs=[droid_policy.DroidOutputs()],
+        )
+
+        # # Data loader returns absolute joint position actions -- convert to delta actions for training.
+        # delta_action_mask = _transforms.make_bool_mask(7, -1)
+        # data_transforms = data_transforms.push(
+        #     inputs=[_transforms.DeltaActions(delta_action_mask)],
+        #     outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+        # )
+
+        model_transforms = ModelTransformFactory()(model_config)
+
+        assert self.batch_size > 0, "Need to set batch size for RLDS data loader."
+        assert self.rlds_data_dir is not None, "Need to set rlds data dir for RLDS data loader."
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            use_quantile_norm=model_config.model_type == ModelType.PI0_FAST,
+            batch_size=self.batch_size,
+            rlds_data_dir=self.rlds_data_dir,
         )
 
 
@@ -596,6 +655,30 @@ _CONFIGS = [
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
         num_train_steps=20_000,
+    ),
+    #
+    # Fine-tuning DROID configs.
+    #
+    TrainConfig(
+        name="pi0_fast_droid_finetune",
+        model=pi0_fast.Pi0FASTConfig(action_dim=8, action_horizon=16, max_token_len=180),
+        data=RLDSDroidDataConfig(
+            repo_id="droid",
+            base_config=DataConfig(),
+            batch_size=1,
+            rlds_data_dir="/app/karl/datasets",
+        ),
+        # Note that we load the pi0-FAST base model checkpoint here.
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_fast_base/params"),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=0.0,
+            decay_steps=1_000_000,
+            decay_lr=0.0,
+        ),
+        num_train_steps=100_000,
+        batch_size=32,
+        log_interval=1,
     ),
     # This config is used to demonstrate how to train on a simple simulated environment.
     TrainConfig(

@@ -22,9 +22,21 @@ class RemoveStrings(transforms.DataTransformFn):
 
 def create_dataset(config: _config.TrainConfig) -> tuple[_config.DataConfig, _data_loader.Dataset]:
     data_config = config.data.create(config.assets_dirs, config.model)
-    if data_config.repo_id is None:
-        raise ValueError("Data config must have a repo_id")
-    dataset = _data_loader.create_dataset(data_config, config.model)
+    if data_config.rlds_data_dir is not None:
+        from openpi.training.droid_rlds_dataset import DroidRldsDataset
+
+        assert (
+            data_config.batch_size == 1
+        ), "Batch size must be set to 1 in DROID data config for norm stats computation."
+        assert data_config.rlds_data_dir is not None, "RLDS data dir must be set for DROID data config."
+        dataset = DroidRldsDataset(
+            data_dir=data_config.rlds_data_dir,
+            batch_size=data_config.batch_size,
+        )
+    else:
+        if data_config.repo_id is None:
+            raise ValueError("Data config must have a repo_id")
+        dataset = _data_loader.create_dataset(data_config, config.model)
     dataset = _data_loader.TransformedDataset(
         dataset,
         [
@@ -48,10 +60,13 @@ def main(config_name: str, max_frames: int | None = None):
         num_frames = max_frames
         shuffle = True
 
-    data_loader = _data_loader.TorchDataLoader(
+    data_loader_cls = (
+        _data_loader.RLDSDataLoader if data_config.rlds_data_dir is not None else _data_loader.TorchDataLoader
+    )
+    data_loader = data_loader_cls(
         dataset,
         local_batch_size=1,
-        num_workers=8,
+        num_workers=0 if data_config.rlds_data_dir is not None else 8,
         shuffle=shuffle,
         num_batches=num_frames,
     )
