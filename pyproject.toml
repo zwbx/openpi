@@ -112,6 +112,7 @@ ignore = [
     "T201",   # We use print statements.
     "PD008",  # Lots of false positives.
     "ISC001", # Disabling to support ruff format.
+    "LOG015", # Use logger.info.
 ]
 unfixable = [
     "B905", # Fix defaults to strict=False, which is not what we want.
