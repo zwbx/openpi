@@ -1,5 +1,5 @@
 import math
-from typing import Literal
+from typing import Any, Literal
 
 import chex
 from einops import einops
@@ -20,7 +20,7 @@ class FsqCodebook(nn.Module):
     _bins_per_dim: tuple[int] | None = None
 
     @property
-    def bins_per_dim(self):
+    def bins_per_dim(self) -> tuple[int]:
         if self._bins_per_dim is not None:
             return self._bins_per_dim
 
@@ -34,14 +34,14 @@ class FsqCodebook(nn.Module):
             raise ValueError(f"Codebook type {self.codebook_type} not supported.")
 
     @property
-    def place_values(self):
+    def place_values(self) -> jnp.ndarray:
         place_values = [1]
         for b in self.bins_per_dim[:-1]:
             place_values.append(place_values[-1] * b)
         return jnp.array(place_values)
 
     @staticmethod
-    def _get_bins_fsq(target_codebook_size):
+    def _get_bins_fsq(target_codebook_size: int) -> tuple[int]:
         """
         Get bins per dimension based on codebook size, from the original FSQ paper.
         """
@@ -59,7 +59,7 @@ class FsqCodebook(nn.Module):
             raise ValueError(f"Codebook size {target_codebook_size} not supported.")
 
     @staticmethod
-    def _get_bins_custom(target_codebook_size):
+    def _get_bins_custom(target_codebook_size: int) -> tuple[int]:
         if target_codebook_size == 2**8:
             return (16, 16)
         elif target_codebook_size == 2**10:  # noqa: RET505
@@ -73,7 +73,7 @@ class FsqCodebook(nn.Module):
         return None
 
     @staticmethod
-    def _get_bins_lfq(target_codebook_size):
+    def _get_bins_lfq(target_codebook_size: int) -> tuple[int]:
         """
         Get bins per dimension according to the Lookup-Free Quantization paper (2 bins per dimension)
         """
@@ -85,12 +85,12 @@ class FsqCodebook(nn.Module):
         self.proj_down = nn.Dense(len(self.bins_per_dim))
         self.proj_up = nn.Dense(self.input_dim)
 
-    def __call__(self, inputs):
+    def __call__(self, inputs: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
         tokens, z = self.encode(inputs)
         output = self.decode(tokens, z_grad=z)
         return tokens, output
 
-    def encode(self, inputs):
+    def encode(self, inputs: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
         bases = jnp.array(self.bins_per_dim)
 
         x = self.proj_down(inputs)
@@ -102,7 +102,7 @@ class FsqCodebook(nn.Module):
 
         return tokens, z
 
-    def decode(self, tokens, z_grad: jax.Array | None = None):
+    def decode(self, tokens: jnp.ndarray, z_grad: jax.Array | None = None) -> jnp.ndarray:
         bases = jnp.array(self.bins_per_dim)
         digits = self.digitize(tokens)
 
@@ -114,14 +114,14 @@ class FsqCodebook(nn.Module):
 
         return self.proj_up(z_q)
 
-    def undigitize(self, digits):
+    def undigitize(self, digits: jnp.ndarray) -> jnp.ndarray:
         return jnp.sum(digits * jnp.array(self.place_values), axis=-1)
 
-    def digitize(self, tokens):
+    def digitize(self, tokens: jnp.ndarray) -> jnp.ndarray:
         return (tokens[..., None] // jnp.array(self.place_values)) % jnp.array(self.bins_per_dim)
 
     @property
-    def vocab_size(self):
+    def vocab_size(self) -> int:
         return math.prod(self.bins_per_dim)
 
 
@@ -132,7 +132,7 @@ class ResNetDownBlock(nn.Module):
     group_size: int = 32
 
     @nn.compact
-    def __call__(self, x, *, train=True):
+    def __call__(self, x: jnp.ndarray, *, train: bool = True) -> jnp.ndarray:
         skip = x
 
         if self.stride > 1 or x.shape[-1] != self.n_filters:
@@ -154,7 +154,7 @@ class ResNetUpBlock(nn.Module):
     group_size: int = 32
 
     @nn.compact
-    def __call__(self, x, *, train=True):
+    def __call__(self, x: jnp.ndarray, *, train: bool = True) -> jnp.ndarray:
         skip = x
 
         if self.stride > 1:
@@ -184,30 +184,29 @@ class LookupFreeQuantization(nn.Module):
 
     def setup(self):
         self.codebook = jnp.array([-1, 1])
-        # self.activation = lambda x: x
         self.activation = nn.tanh
 
         self.project_down = nn.Dense(self.num_dims)
         self.project_up = nn.Dense(self.latent_dim)
 
-    def encode(self, z):
+    def encode(self, z: jnp.ndarray) -> jnp.ndarray:
         z = self.project_down(z)
         token_squared_distances = jnp.square(z[..., None] - self.codebook)
         token_bits = jnp.argmin(token_squared_distances, axis=-1)
         return jnp.sum(token_bits * (2 ** jnp.arange(self.num_dims)), axis=-1)
 
-    def decode(self, tokens):
+    def decode(self, tokens: jnp.ndarray) -> jnp.ndarray:
         token_bits = (tokens[..., None] & (2 ** jnp.arange(self.num_dims))).astype(jnp.int32)
         return self.project_up(self.codebook[token_bits])
 
-    def loss(self, x):
+    def loss(self, x: jnp.ndarray) -> LfqCodebookOutput:
         z = self.project_down(x)
         z = self.activation(z)
 
         token_squared_distances = jnp.square(z[..., None] - self.codebook)
         tokens = jnp.argmin(token_squared_distances, axis=-1)
 
-        token_bit_log_probs = -token_squared_distances  # jax.nn.log_softmax(-token_squared_distances, axis=-1)
+        token_bit_log_probs = -token_squared_distances
         # Compute token log probs for tokens 0..2^num_dims-1 by summing corresponding log-probs
         token_bit_expansions = jnp.bitwise_and(
             jnp.arange(2**self.num_dims)[None, :], 2 ** jnp.arange(self.num_dims)[:, None]
@@ -236,7 +235,7 @@ class LookupFreeQuantization(nn.Module):
         )
 
 
-def make_block_causal_attention_matrix(q, k, bs_q, bs_k):
+def make_block_causal_attention_matrix(q: jnp.ndarray, k: jnp.ndarray, bs_q: int, bs_k: int) -> jnp.ndarray:
     return nn.make_attention_mask(q, k, pairwise_fn=lambda x, y: jnp.greater_equal(x // bs_k, y // bs_q))
 
 
@@ -245,14 +244,7 @@ class GeGLU(Module):
     GeGLU is a Flax layer that combines a linear transformation with a GELU
     activation function in a gating mechanism. It is often used in Transformer models
     to provide non-linear capabilities while preserving a strong linear component.
-    Example usage::
-        >>> import flax.linen as nn
-        >>> class TransformerBlock(nn.Module):
-        ...   @nn.compact
-        ...   def __call__(self, x):
-        ...     x = nn.Dense(2)(x)
-        ...     x = nn.GeGLU()(x) # initialized
-        ...     return x
+
     Attributes:
         features: the number of output features (default: None).
     """
@@ -281,7 +273,15 @@ class CrossAttentionLayer(nn.Module):
     mlp_ratio: float = 4.0
 
     @nn.compact
-    def __call__(self, x, y, *, mask_self=None, mask_cross=None, train=True):
+    def __call__(
+        self,
+        x: jnp.ndarray,
+        y: jnp.ndarray,
+        *,
+        mask_self: jnp.ndarray | None = None,
+        mask_cross: jnp.ndarray | None = None,
+        train: bool = True,
+    ) -> jnp.ndarray:
         d_embed = x.shape[-1]
         seq_len_q = x.shape[-2]
         seq_len_k = y.shape[-2]
@@ -307,12 +307,10 @@ class CrossAttentionLayer(nn.Module):
         # Cross-attention block
         skip = x
         x = nn.LayerNorm()(x)
-        # bias = -jnp.abs(jnp.linspace(0, 1, seq_len_q)[:, None] - jnp.linspace(0, 1, seq_len_k)) * 5
         x = nn.MultiHeadDotProductAttention(
             num_heads=self.num_heads or d_embed // 64,
             dropout_rate=self.dropout_rate,
             deterministic=not train,
-            # attention_fn=partial(nn.dot_product_attention, bias=bias),
         )(x, y, y, mask=mask_cross)
         x = skip + x
 
@@ -326,7 +324,7 @@ class CrossAttentionLayer(nn.Module):
         return skip + x
 
 
-def sinusoidal_pe_init(_, shape):
+def sinusoidal_pe_init(_, shape: tuple[int, int]) -> jnp.ndarray:
     seq_len, d_embed = shape
 
     position = jnp.arange(0, seq_len, 1)
@@ -350,7 +348,14 @@ class TokenizerEncoderDecoder(nn.Module):
     use_state_conditioning: bool = False
 
     @nn.compact
-    def __call__(self, y, *, train=True, state_conditioning=None, mask=None):
+    def __call__(
+        self,
+        y: jnp.ndarray,
+        *,
+        train: bool = True,
+        state_conditioning: jnp.ndarray | None = None,
+        mask: jnp.ndarray | None = None,
+    ) -> jnp.ndarray:
         x = self.param("q_embed", sinusoidal_pe_init, (self.num_tokens, y.shape[-1]))
         x = jax.numpy.broadcast_to(x, y.shape[:-2] + x.shape[-2:])
 
@@ -392,7 +397,7 @@ class FsqAttentionTokenizer(nn.Module):
     use_state_conditioning: bool = False
 
     @property
-    def vocab_size(self):
+    def vocab_size(self) -> int:
         return math.prod(FsqCodebook._get_bins_fsq(self.target_codebook_size))  # noqa: SLF001
 
     def setup(self):
@@ -422,7 +427,9 @@ class FsqAttentionTokenizer(nn.Module):
         self.proj_mean = nn.Dense(self.data_dim)
         self.out_scale = self.param("out_scale", lambda _: jnp.full((), 1.0))
 
-    def tokenize(self, action, *, obs=None, train=False):
+    def tokenize(
+        self, action: jnp.ndarray, *, obs: jnp.ndarray | None = None, train: bool = False
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
         if self.bound is not None:
             action = jnp.clip(action, -self.bound, self.bound)
 
@@ -431,12 +438,14 @@ class FsqAttentionTokenizer(nn.Module):
 
         return self.codebook.encode(x)
 
-    def detokenize(self, tokens, *, obs=None):
+    def detokenize(self, tokens: jnp.ndarray, *, obs: jnp.ndarray | None = None) -> jnp.ndarray:
         x = self.decoder(self.codebook.decode(tokens), state_conditioning=obs)
         mean = self.proj_mean(x)
         return mean * self.out_scale
 
-    def loss(self, action, *, obs=None, train=True):
+    def loss(
+        self, action: jnp.ndarray, *, obs: jnp.ndarray | None = None, train: bool = True
+    ) -> tuple[jnp.ndarray, dict[str, jnp.ndarray]]:
         # Encode
         x = self.proj(action)
         z = self.encoder(x, train=train, state_conditioning=obs)
@@ -456,7 +465,7 @@ class FsqAttentionTokenizer(nn.Module):
             "mae": mae,
         }
 
-    def __call__(self, *args, **kwargs):
+    def __call__(self, *args: Any, **kwargs: Any) -> tuple[jnp.ndarray, dict[str, jnp.ndarray]]:
         """
         Dummy for .init
         """

@@ -66,3 +66,5 @@ uv run scripts/serve_policy.py policy:checkpoint --policy.config=paligemma_vq_dr
 # pi0-style diffusion / flow VLA, trained on DROID from PaliGemma.
 uv run scripts/serve_policy.py policy:checkpoint --policy.config=paligemma_diffusion_droid --policy.dir=gs://openpi-assets/checkpoints/roboarena/paligemma_diffusion_droid
 ```
+
+You can find the inference configs in [roboarena_config.py](../../src/openpi/training/misc/roboarena_config.py).

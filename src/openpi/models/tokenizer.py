@@ -156,6 +156,19 @@ class BinningTokenizer:
     def tokenize(
         self, prompt: str, state: np.ndarray, actions: np.ndarray | None
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Tokenize a prompt and state into a sequence of tokens.
+
+        Args:
+            prompt: The text prompt to tokenize.
+            state: The state array to discretize and tokenize.
+            actions: Must be None. Action encoding is not currently supported.
+
+        Returns:
+            A tuple of (tokens, token_mask, ar_mask, targets).
+
+        Raises:
+            NotImplementedError: If actions is not None.
+        """
         cleaned_text = prompt.lower().strip().replace("_", " ")
 
         # Convention: state gets discretized into 256 discrete bins (assumed range after normalization: [-1, 1])
