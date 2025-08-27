@@ -7,7 +7,7 @@ The data loader also applies a few DROID-specific data filters / transformations
 
 from enum import Enum
 from enum import auto
-
+from pathlib import Path
 
 class DroidActionSpace(Enum):
     """Action space for DROID dataset."""
@@ -70,7 +70,7 @@ class DroidRldsDataset:
             import json
             from tqdm import tqdm
 
-            with open(filter_dict_path, "r") as f:
+            with Path(filter_dict_path).open("r") as f:
                 filter_dict = json.load(f)
             
             filter_last_n_in_ranges = filter_dict.get("metadata", {}).get("filter_last_n_in_ranges", 0)

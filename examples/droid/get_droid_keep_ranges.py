@@ -4,6 +4,7 @@ import numpy as np
 from tqdm import tqdm
 import tensorflow as tf
 import tensorflow_datasets as tfds
+from pathlib import Path
 
 os.environ["CUDA_VISIBLE_DEVICES"] = ""  # Set to the GPU you want to use, or leave empty for CPU
 
@@ -21,8 +22,8 @@ min_non_idle_len = 16 # If fewer than this number of consecutive non-idle frames
 filter_last_n_in_ranges = 10 # When using a filter dict, remove this many frames from the end of each range
 
 keep_ranges_map = {"metadata": {"filter_last_n_in_ranges": filter_last_n_in_ranges}, "keep_ranges": {}}
-if os.path.exists(keep_ranges_path):
-    with open(keep_ranges_path, "r") as f:
+if Path(keep_ranges_path).exists():
+    with Path(keep_ranges_path).open("r") as f:
         keep_ranges_map = json.load(f)
     print(f"Resuming from {len(keep_ranges_map['keep_ranges'])} episodes already processed")
 
@@ -34,9 +35,7 @@ for ep_idx, ep in enumerate(tqdm(ds)):
     if key in keep_ranges_map["keep_ranges"]:
         continue
     
-    joint_velocities = []
-    for step in ep["steps"]:
-        joint_velocities.append(step["action_dict"]["joint_velocity"].numpy())
+    joint_velocities = [step["action_dict"]["joint_velocity"].numpy() for step in ep["steps"]]
     joint_velocities = np.array(joint_velocities)
 
     is_idle_array = np.hstack([np.array([False]), np.all(np.abs(joint_velocities[1:] - joint_velocities[:-1]) < 1e-3, axis=1)])
@@ -53,7 +52,7 @@ for ep_idx, ep in enumerate(tqdm(ds)):
     true_ends = true_ends[true_segment_masks]
 
     keep_mask = np.ones(len(joint_velocities), dtype=bool)
-    for start, end in zip(true_starts, true_ends):
+    for start, end in zip(true_starts, true_ends, strict=True):
         keep_mask[start:end] = False
 
     # Get all non-idle ranges of at least 16
@@ -68,13 +67,13 @@ for ep_idx, ep in enumerate(tqdm(ds)):
     true_ends = true_ends[true_segment_masks]
 
     keep_ranges_map["keep_ranges"][key] = []
-    for start, end in zip(true_starts, true_ends):
+    for start, end in zip(true_starts, true_ends, strict=True):
         keep_ranges_map["keep_ranges"][key].append((int(start), int(end)))
 
     if ep_idx % 1000 == 0:
-        with open(keep_ranges_path, "w") as f:
+        with Path(keep_ranges_path).open("w") as f:
             json.dump(keep_ranges_map, f)
 
 print("Done!")
-with open(keep_ranges_path, "w") as f:
+with Path(keep_ranges_path).open("w") as f:
     json.dump(keep_ranges_map, f)
