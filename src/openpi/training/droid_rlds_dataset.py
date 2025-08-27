@@ -32,7 +32,6 @@ class DroidRldsDataset:
         num_parallel_reads: int = -1,  # -1 == tf.data.AUTOTUNE -- hack to not import tf at top level
         num_parallel_calls: int = -1,  # -1 == tf.data.AUTOTUNE -- hack to not import tf at top level
         filter_dict_path = None,
-        filter_last_n_in_ranges = 0,
     ):
         # Import tensorflow here to not make it mandatory in case RLDS data loader is not used.
         import dlimp as dl
@@ -69,7 +68,7 @@ class DroidRldsDataset:
 
             for episode_key, ranges in tqdm(filter_dict.items()):
                 for start, end in ranges:
-                    for t in range(start, end - filter_last_n_in_ranges):
+                    for t in range(start, end):
                         frame_key = f"{episode_key}--{t}"
                         keys_tensor.append(frame_key)
                         values_tensor.append(True)

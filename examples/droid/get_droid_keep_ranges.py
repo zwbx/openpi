@@ -22,6 +22,7 @@ if os.path.exists(keep_ranges_path):
 
 min_idle_len = 7 # If more than this number of consecutive idle frames, filter all of them out
 min_non_idle_len = 16 # If fewer than this number of consecutive non-idle frames, filter all of them out
+remove_last_n_in_ranges = 10 # When using a filter dict, remove this many frames from the end of each range
 
 for ep_idx, ep in enumerate(tqdm(ds)):
     recording_folderpath = ep["episode_metadata"]["recording_folderpath"].numpy().decode()
@@ -66,7 +67,7 @@ for ep_idx, ep in enumerate(tqdm(ds)):
 
     keep_ranges_map[key] = []
     for start, end in zip(true_starts, true_ends):
-        keep_ranges_map[key].append((int(start), int(end)))
+        keep_ranges_map[key].append((int(start), int(end) - remove_last_n_in_ranges))
 
     if ep_idx % 1000 == 0:
         with open(keep_ranges_path, "w") as f:
