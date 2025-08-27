@@ -1,10 +1,11 @@
-import os
 import json
+import os
+from pathlib import Path
+
 import numpy as np
-from tqdm import tqdm
 import tensorflow as tf
 import tensorflow_datasets as tfds
-from pathlib import Path
+from tqdm import tqdm
 
 os.environ["CUDA_VISIBLE_DEVICES"] = ""  # Set to the GPU you want to use, or leave empty for CPU
 
@@ -17,9 +18,9 @@ tf.data.experimental.ignore_errors(ds)
 
 keep_ranges_path = "<path_to_where_to_save_the_json>"
 
-min_idle_len = 7 # If more than this number of consecutive idle frames, filter all of them out
-min_non_idle_len = 16 # If fewer than this number of consecutive non-idle frames, filter all of them out
-filter_last_n_in_ranges = 10 # When using a filter dict, remove this many frames from the end of each range
+min_idle_len = 7  # If more than this number of consecutive idle frames, filter all of them out
+min_non_idle_len = 16  # If fewer than this number of consecutive non-idle frames, filter all of them out
+filter_last_n_in_ranges = 10  # When using a filter dict, remove this many frames from the end of each range
 
 keep_ranges_map = {"metadata": {"filter_last_n_in_ranges": filter_last_n_in_ranges}, "keep_ranges": {}}
 if Path(keep_ranges_path).exists():
@@ -34,18 +35,20 @@ for ep_idx, ep in enumerate(tqdm(ds)):
     key = f"{recording_folderpath}--{file_path}"
     if key in keep_ranges_map["keep_ranges"]:
         continue
-    
+
     joint_velocities = [step["action_dict"]["joint_velocity"].numpy() for step in ep["steps"]]
     joint_velocities = np.array(joint_velocities)
 
-    is_idle_array = np.hstack([np.array([False]), np.all(np.abs(joint_velocities[1:] - joint_velocities[:-1]) < 1e-3, axis=1)])
+    is_idle_array = np.hstack(
+        [np.array([False]), np.all(np.abs(joint_velocities[1:] - joint_velocities[:-1]) < 1e-3, axis=1)]
+    )
 
     # Get all idle ranges of length at least 7
     padded = np.concatenate([[False], is_idle_array, [False]])
 
     diff = np.diff(padded.astype(int))
     true_starts = np.where(diff == 1)[0]  # +1 transitions
-    true_ends   = np.where(diff == -1)[0]  # -1 transitions
+    true_ends = np.where(diff == -1)[0]  # -1 transitions
 
     true_segment_masks = (true_ends - true_starts) >= min_idle_len
     true_starts = true_starts[true_segment_masks]
@@ -60,7 +63,7 @@ for ep_idx, ep in enumerate(tqdm(ds)):
 
     diff = np.diff(padded.astype(int))
     true_starts = np.where(diff == 1)[0]  # +1 transitions
-    true_ends   = np.where(diff == -1)[0]  # -1 transitions
+    true_ends = np.where(diff == -1)[0]  # -1 transitions
 
     true_segment_masks = (true_ends - true_starts) >= min_non_idle_len
     true_starts = true_starts[true_segment_masks]

@@ -9,6 +9,7 @@ from enum import Enum
 from enum import auto
 from pathlib import Path
 
+
 class DroidActionSpace(Enum):
     """Action space for DROID dataset."""
 
@@ -31,7 +32,7 @@ class DroidRldsDataset:
         shuffle_buffer_size: int = 250_000,
         num_parallel_reads: int = -1,  # -1 == tf.data.AUTOTUNE -- hack to not import tf at top level
         num_parallel_calls: int = -1,  # -1 == tf.data.AUTOTUNE -- hack to not import tf at top level
-        filter_dict_path = None,
+        filter_dict_path=None,
     ):
         # Import tensorflow here to not make it mandatory in case RLDS data loader is not used.
         import dlimp as dl
@@ -56,7 +57,7 @@ class DroidRldsDataset:
 
         # Load the filter dictionary if provided.
         # The filter dictionary is a JSON file that maps episode keys to ranges of frames to keep
-        # (e.g., 
+        # (e.g.,
         # {
         #     "metadata": {
         #         "filter_last_n_in_ranges": 10
@@ -64,36 +65,37 @@ class DroidRldsDataset:
         #     "keep_ranges": {
         #         "<episode key>": [[0, 100], [200, 300]]
         #     }
-        #  } 
+        #  }
         # means keep frames 0-89 and 200-289).
         if filter_dict_path is not None:
             import json
+
             from tqdm import tqdm
 
             with Path(filter_dict_path).open("r") as f:
                 filter_dict = json.load(f)
-            
+
             filter_last_n_in_ranges = filter_dict.get("metadata", {}).get("filter_last_n_in_ranges", 0)
-            print(f"Using filter dictionary with {len(filter_dict['keep_ranges'])} episodes, filtering last {filter_last_n_in_ranges} frames in each range")
-            
+            print(
+                f"Using filter dictionary with {len(filter_dict['keep_ranges'])} episodes, filtering last {filter_last_n_in_ranges} frames in each range"
+            )
+
             keys_tensor = []
             values_tensor = []
 
-            for episode_key, ranges in tqdm(filter_dict['keep_ranges'].items()):
+            for episode_key, ranges in tqdm(filter_dict["keep_ranges"].items()):
                 for start, end in ranges:
                     for t in range(start, end - filter_last_n_in_ranges):
                         frame_key = f"{episode_key}--{t}"
                         keys_tensor.append(frame_key)
                         values_tensor.append(True)
             self.filter_table = tf.lookup.StaticHashTable(
-                tf.lookup.KeyValueTensorInitializer(keys_tensor, values_tensor),
-                default_value=False
+                tf.lookup.KeyValueTensorInitializer(keys_tensor, values_tensor), default_value=False
             )
             print("Filter hash table initialized")
         else:
             self.filter_table = tf.lookup.StaticHashTable(
-                tf.lookup.KeyValueTensorInitializer([""], [True]),
-                default_value=True
+                tf.lookup.KeyValueTensorInitializer([""], [True]), default_value=True
             )
 
         def restructure(traj):
@@ -129,7 +131,13 @@ class DroidRldsDataset:
             # Compute a uniquely-identifying step ID by concatenating the recording folderpath, file path,
             # and each step's time step index. This will index into the filter hash table, and if it returns true,
             # then the frame passes the filter.
-            step_id = traj["traj_metadata"]["episode_metadata"]["recording_folderpath"] + "--" + traj["traj_metadata"]["episode_metadata"]["file_path"] + "--" + indices
+            step_id = (
+                traj["traj_metadata"]["episode_metadata"]["recording_folderpath"]
+                + "--"
+                + traj["traj_metadata"]["episode_metadata"]["file_path"]
+                + "--"
+                + indices
+            )
             passes_filter = self.filter_table.lookup(step_id)
 
             return {
@@ -175,7 +183,7 @@ class DroidRldsDataset:
 
         def filter_from_dict(frame):
             return frame["passes_filter"]
-        
+
         dataset = dataset.filter(filter_from_dict)
 
         # Decode images: RLDS saves encoded images, only decode now for efficiency
