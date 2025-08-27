@@ -93,6 +93,10 @@ class DataConfig:
     rlds_data_dir: str | None = None
     # Action space for DROID dataset.
     action_space: droid_rlds_dataset.DroidActionSpace | None = None
+    # Path to the filter dictionary file for DROID dataset
+    filter_dict_path: str | None = None
+    # Number of frames to consider for filtering for DROID dataset
+    filter_last_n_in_ranges: int = 0
 
 
 class GroupFactory(Protocol):
@@ -393,6 +397,8 @@ class RLDSDroidDataConfig(DataConfigFactory):
             use_quantile_norm=model_config.model_type == ModelType.PI0_FAST,
             rlds_data_dir=self.rlds_data_dir,
             action_space=self.action_space,
+            filter_dict_path=self.filter_dict_path,
+            filter_last_n_in_ranges=self.filter_last_n_in_ranges
         )
 
 
@@ -691,6 +697,9 @@ _CONFIGS = [
             # Set this to the path to your DROID RLDS dataset (the parent directory of the `droid` directory).
             rlds_data_dir="<path_to_droid_rlds_dataset>",
             action_space=droid_rlds_dataset.DroidActionSpace.JOINT_POSITION,
+            # Set this to the path for whatever filtering json you wish to use (or None for default filtering scheme)
+            filter_dict_path="<path_to_filtering_json_or_None>",
+            filter_last_n_in_ranges=10,
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_fast_base/params"),
         lr_schedule=_optimizer.CosineDecaySchedule(

@@ -42,7 +42,7 @@ class DroidRldsDataset:
         # Configure Tensorflow with *no GPU devices* (to prevent clobber with PyTorch / JAX)
         tf.config.set_visible_devices([], "GPU")
 
-        builder = tfds.builder("droid", data_dir=data_dir)
+        builder = tfds.builder("droid", data_dir=data_dir, version="1.0.1")
         dataset = dl.DLataset.from_rlds(builder, split="train", shuffle=shuffle, num_parallel_reads=num_parallel_reads)
 
         # Filter out any unsuccessful trajectories -- we use the file name to check this
@@ -111,6 +111,15 @@ class DroidRldsDataset:
                 [traj["language_instruction"], traj["language_instruction_2"], traj["language_instruction_3"]]
             )[0]
 
+            traj_len = tf.shape(traj["action"])[0]
+            indices = tf.as_string(tf.range(traj_len))
+
+            # Compute a uniquely-identifying step ID by concatenating the recording folderpath, file path,
+            # and each step's time step index. This will index into the filter hash table, and if it returns true,
+            # then the frame passes the filter.
+            step_id = traj["traj_metadata"]["episode_metadata"]["recording_folderpath"] + "--" + traj["traj_metadata"]["episode_metadata"]["file_path"] + "--" + indices
+            passes_filter = self.filter_table.lookup(step_id)
+
             return {
                 "actions": actions,
                 "observation": {
@@ -120,6 +129,8 @@ class DroidRldsDataset:
                     "gripper_position": traj["observation"]["gripper_position"],
                 },
                 "prompt": instruction,
+                "step_id": step_id,
+                "passes_filter": passes_filter,
             }
 
         dataset = dataset.traj_map(restructure, num_parallel_calls)
