@@ -63,12 +63,16 @@ class DroidRldsDataset:
 
             with open(filter_dict_path, "r") as f:
                 filter_dict = json.load(f)
+            
+            filter_last_n_in_ranges = filter_dict.get("metadata", {}).get("filter_last_n_in_ranges", 0)
+            print(f"Using filter dictionary with {len(filter_dict['keep_ranges'])} episodes, filtering last {filter_last_n_in_ranges} frames in each range")
+            
             keys_tensor = []
             values_tensor = []
 
-            for episode_key, ranges in tqdm(filter_dict.items()):
+            for episode_key, ranges in tqdm(filter_dict['keep_ranges'].items()):
                 for start, end in ranges:
-                    for t in range(start, end):
+                    for t in range(start, end - filter_last_n_in_ranges):
                         frame_key = f"{episode_key}--{t}"
                         keys_tensor.append(frame_key)
                         values_tensor.append(True)
