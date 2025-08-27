@@ -178,21 +178,6 @@ class DroidRldsDataset:
         
         dataset = dataset.filter(filter_from_dict)
 
-        if filter_dict_path is None:
-            # If filter_dict_path is not provided, use default filtering
-
-            # Filter out frames where actions are idle. Must be done after flattening, as filter should apply per-frame.
-            def filter_idle(traj):
-                """Filter out chunks with idle actions.
-                --> we filter if at least first half of chunk does not move.
-                """
-                if action_space == DroidActionSpace.JOINT_POSITION:
-                    # Compute delta to first position in action chunk
-                    return tf.reduce_any(tf.abs(traj["actions"][: action_chunk_size // 2] - traj["actions"][:1]) > 1e-3)
-                return tf.reduce_any(tf.abs(traj["actions"][: action_chunk_size // 2]) > 1e-3)
-
-            dataset = dataset.filter(filter_idle)
-
         # Decode images: RLDS saves encoded images, only decode now for efficiency
         def decode_images(traj):
             traj["observation"]["image"] = tf.io.decode_image(

@@ -692,7 +692,7 @@ _CONFIGS = [
             # Set this to the path to your DROID RLDS dataset (the parent directory of the `droid` directory).
             rlds_data_dir="<path_to_droid_rlds_dataset>",
             action_space=droid_rlds_dataset.DroidActionSpace.JOINT_POSITION,
-            # Set this to the path for whatever filtering json you wish to use (or None for default filtering scheme)
+            # Set this to the path for whatever filtering json you wish to use (or None)
             filter_dict_path="<path_to_filtering_json_or_None>",
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_fast_base/params"),
