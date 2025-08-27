@@ -56,7 +56,16 @@ class DroidRldsDataset:
 
         # Load the filter dictionary if provided.
         # The filter dictionary is a JSON file that maps episode keys to ranges of frames to keep
-        # (e.g., {"<episode key>": [[0, 100], [200, 300]]} means keep frames 0-99 and 200-299).
+        # (e.g., 
+        # {
+        #     "metadata": {
+        #         "filter_last_n_in_ranges": 10
+        #     },
+        #     "keep_ranges": {
+        #         "<episode key>": [[0, 100], [200, 300]]
+        #     }
+        #  } 
+        # means keep frames 0-89 and 200-289).
         if filter_dict_path is not None:
             import json
             from tqdm import tqdm
