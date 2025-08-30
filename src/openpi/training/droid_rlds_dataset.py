@@ -59,9 +59,6 @@ class DroidRldsDataset:
         # The filter dictionary is a JSON file that maps episode keys to ranges of frames to keep
         # (e.g.,
         # {
-        #     "metadata": {
-        #         "filter_last_n_in_ranges": 10
-        #     },
         #     "keep_ranges": {
         #         "<episode key>": [[0, 100], [200, 300]]
         #     }
@@ -75,17 +72,14 @@ class DroidRldsDataset:
             with Path(filter_dict_path).open("r") as f:
                 filter_dict = json.load(f)
 
-            filter_last_n_in_ranges = filter_dict.get("metadata", {}).get("filter_last_n_in_ranges", 0)
-            print(
-                f"Using filter dictionary with {len(filter_dict['keep_ranges'])} episodes, filtering last {filter_last_n_in_ranges} frames in each range"
-            )
+            print(f"Using filter dictionary with {len(filter_dict['keep_ranges'])} episodes")
 
             keys_tensor = []
             values_tensor = []
 
-            for episode_key, ranges in tqdm(filter_dict["keep_ranges"].items()):
+            for episode_key, ranges in tqdm(filter_dict.items()):
                 for start, end in ranges:
-                    for t in range(start, end - filter_last_n_in_ranges):
+                    for t in range(start, end):
                         frame_key = f"{episode_key}--{t}"
                         keys_tensor.append(frame_key)
                         values_tensor.append(True)
