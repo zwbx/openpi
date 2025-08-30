@@ -347,7 +347,8 @@ class RLDSDroidDataConfig(DataConfigFactory):
     action_space: droid_rlds_dataset.DroidActionSpace | None = None
 
     # Filtering options. Can pass a path to a dictionary that maps episodes to timestep ranges
-    # to tuples denoting ranges of time steps to keep (start, end).
+    # to tuples denoting ranges of time steps to keep (start, end). Episodes are uniquely identified with
+    # f"{recording_folderpath}--{file_path}", both of which are present in the RLDS episode metadata.
     # Path to the filter dictionary file.
     filter_dict_path: str | None = None
 
