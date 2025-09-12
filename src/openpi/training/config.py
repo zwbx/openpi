@@ -20,6 +20,7 @@ import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
+import openpi.policies.simpler_policy as simpler_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
@@ -66,6 +67,8 @@ class DataConfig:
     repo_id: str | None = None
     # Directory within the assets directory containing the data assets.
     asset_id: str | None = None
+    # Root directory for local datasets. If None, will download from HuggingFace.
+    dataset_root: str | None = None
     # Contains precomputed normalization stats. If None, normalization will not be performed.
     norm_stats: dict[str, _transforms.NormStats] | None = None
 
@@ -286,11 +289,9 @@ class LeRobotSimplerDataConfig(DataConfigFactory):
             inputs=[
                 _transforms.RepackTransform(
                     {
-                        "observation/image": "image",
-                        "observation/wrist_image": "wrist_image",
-                        "observation/state": "state",
-                        "actions": "actions",
-                        "prompt": "prompt",
+                        "image": "observation.images.image_0",
+                        "state": "observation.state", 
+                        "actions": "action",
                     }
                 )
             ]
@@ -298,8 +299,8 @@ class LeRobotSimplerDataConfig(DataConfigFactory):
 
 
         data_transforms = _transforms.Group(
-            inputs=[libero_policy.LiberoInputs(model_type=model_config.model_type)],
-            outputs=[libero_policy.LiberoOutputs()],
+            inputs=[simpler_policy.SimplerInputs(model_type=model_config.model_type)],
+            outputs=[simpler_policy.SimplerOutputs()],
         )
 
 
@@ -311,6 +312,7 @@ class LeRobotSimplerDataConfig(DataConfigFactory):
             repack_transforms=repack_transform,
             data_transforms=data_transforms,
             model_transforms=model_transforms,
+            action_sequence_keys=("action",),  # Use original dataset field name before repack
         )
 
 @dataclasses.dataclass(frozen=True)
@@ -787,6 +789,28 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
         num_train_steps=30_000,
+    ),
+    TrainConfig(
+        name="pi05_simpler",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False),
+        data=LeRobotSimplerDataConfig(
+            repo_id="lerobot-pi0-bridge",
+            base_config=DataConfig(
+                prompt_from_task=False,
+                dataset_root="/opt/tiger/openpi/data/HaomingSong/lerobot-pi0-bridge"
+            ),
+        ),
+        batch_size=8,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=3e-5,
+            decay_steps=100_000,
+            decay_lr=3e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=10_000,
     ),
     #
     # Fine-tuning Aloha configs.
