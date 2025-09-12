@@ -2,7 +2,7 @@ here/
 pi05_base/
 pi05_base_pytorch/
 # Data directories.
-assets/
+
 checkpoints/
 data/
 wandb/
