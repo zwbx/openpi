@@ -804,15 +804,15 @@ _CONFIGS = [
         batch_size=128,
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=1_000,
-            peak_lr=3e-5,
+            peak_lr=5e-5,
             decay_steps=100_000,
-            decay_lr=3e-5,
+            decay_lr=5e-5,
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         ema_decay=0.999,
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         pytorch_weight_path="/opt/tiger/openpi/pi05_base_pytorch",
-        num_train_steps=10_000,
+        num_train_steps=20_000,
         num_workers=16,
     ),
     TrainConfig(
@@ -832,18 +832,18 @@ _CONFIGS = [
                 dataset_root="/dev/shm/lerobot-pi0-bridge"
             ),
         ),
-        batch_size=64,  # Smaller batch size for low memory
+        batch_size=1024,  # Smaller batch size for low memory
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=1_000,
-            peak_lr=3e-5,
+            peak_lr=5e-5,
             decay_steps=100_000,
-            decay_lr=3e-5,
+            decay_lr=5e-5,
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         # Turn off EMA for LoRA finetuning
         ema_decay=None,
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
-        num_train_steps=10_000,
+        num_train_steps=20_000,
         num_workers=16,
         # Freeze filter for LoRA - only train LoRA parameters
         freeze_filter=pi0_config.Pi0Config(
