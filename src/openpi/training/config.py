@@ -292,6 +292,7 @@ class LeRobotSimplerDataConfig(DataConfigFactory):
                         "image": "observation.images.image_0",
                         "state": "observation.state", 
                         "actions": "action",
+                        "prompt": "prompt",
                     }
                 )
             ]
@@ -777,7 +778,7 @@ _CONFIGS = [
             base_config=DataConfig(prompt_from_task=True),
             extra_delta_transform=False,
         ),
-        batch_size=256,
+        batch_size=128,
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=10_000,
             peak_lr=5e-5,
@@ -787,7 +788,7 @@ _CONFIGS = [
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         ema_decay=0.999,
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
-        pytorch_weight_path="/path/to/your/pytorch_weight_path",
+        # pytorch_weight_path="/path/to/your/pytorch_weight_path",
         num_train_steps=30_000,
     ),
     TrainConfig(
@@ -796,11 +797,11 @@ _CONFIGS = [
         data=LeRobotSimplerDataConfig(
             repo_id="lerobot-pi0-bridge",
             base_config=DataConfig(
-                prompt_from_task=False,
-                dataset_root="/opt/tiger/openpi/data/HaomingSong/lerobot-pi0-bridge"
+                prompt_from_task=True,
+                dataset_root="/dev/shm/lerobot-pi0-bridge"
             ),
         ),
-        batch_size=8,
+        batch_size=128,
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=1_000,
             peak_lr=3e-5,
@@ -810,7 +811,48 @@ _CONFIGS = [
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         ema_decay=0.999,
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        pytorch_weight_path="/opt/tiger/openpi/pi05_base_pytorch",
         num_train_steps=10_000,
+        num_workers=16,
+    ),
+    TrainConfig(
+        name="pi05_simpler_low_mem_finetune",
+        # LoRA fine-tuning configuration for low memory usage
+        model=pi0_config.Pi0Config(
+            pi05=True, 
+            action_horizon=10, 
+            discrete_state_input=False, 
+            paligemma_variant="gemma_2b_lora", 
+            action_expert_variant="gemma_300m_lora"
+        ),
+        data=LeRobotSimplerDataConfig(
+            repo_id="lerobot-pi0-bridge",
+            base_config=DataConfig(
+                prompt_from_task=True,
+                dataset_root="/dev/shm/lerobot-pi0-bridge"
+            ),
+        ),
+        batch_size=64,  # Smaller batch size for low memory
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=3e-5,
+            decay_steps=100_000,
+            decay_lr=3e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        # Turn off EMA for LoRA finetuning
+        ema_decay=None,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=10_000,
+        num_workers=16,
+        # Freeze filter for LoRA - only train LoRA parameters
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora", 
+            action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
     ),
     #
     # Fine-tuning Aloha configs.
