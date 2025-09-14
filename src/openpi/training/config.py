@@ -832,7 +832,7 @@ _CONFIGS = [
                 dataset_root="/dev/shm/lerobot-pi0-bridge"
             ),
         ),
-        batch_size=1024,  # Smaller batch size for low memory
+        batch_size=256,  # Smaller batch size for low memory
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=1_000,
             peak_lr=5e-5,
