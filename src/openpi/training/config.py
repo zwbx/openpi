@@ -793,7 +793,8 @@ _CONFIGS = [
     ),
     TrainConfig(
         name="pi05_simpler_debug",
-        model=pi0_config.Pi0Config(pi05=True, action_horizon=4, action_dim=7, discrete_state_input=True),
+        # model=pi0_config.Pi0Config(pi05=True, discrete_state_input=True),
+        model=pi0_config.Pi0Config(paligemma_variant="dummy", action_expert_variant="dummy", discrete_state_input=True),
         data=LeRobotSimplerDataConfig(
             repo_id="lerobot-pi0-bridge",
             base_config=DataConfig(
@@ -802,22 +803,16 @@ _CONFIGS = [
             ),
         ),
         batch_size=2,
-        lr_schedule=_optimizer.CosineDecaySchedule(
-            warmup_steps=1_000,
-            peak_lr=5e-5,
-            decay_steps=100_000,
-            decay_lr=5e-5,
-        ),
-        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
-        ema_decay=0.999,
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
-        pytorch_weight_path="/opt/tiger/openpi/pi05_base_pytorch",
-        num_train_steps=20_000,
+        save_interval=100,
+        overwrite=True,
+        exp_name="debug",
+        num_train_steps=10,
+        wandb_enabled=False,
         num_workers=0,
     ),
     TrainConfig(
         name="pi05_simpler",
-        model=pi0_config.Pi0Config(pi05=True, action_horizon=4, action_dim=7, discrete_state_input=True),
+        model=pi0_config.Pi0Config(pi05=True,discrete_state_input=True),
         data=LeRobotSimplerDataConfig(
             repo_id="lerobot-pi0-bridge",
             base_config=DataConfig(
@@ -825,19 +820,19 @@ _CONFIGS = [
                 dataset_root="/dev/shm/lerobot-pi0-bridge"
             ),
         ),
-        batch_size=128,
+        batch_size=256,
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=1_000,
             peak_lr=5e-5,
-            decay_steps=100_000,
+            decay_steps=200_000,
             decay_lr=5e-5,
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         ema_decay=0.999,
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
-        pytorch_weight_path="/opt/tiger/openpi/pi05_base_pytorch",
-        num_train_steps=20_000,
-        num_workers=16,
+        pytorch_weight_path="/dev/shm/pi05_base_pytorch",
+        num_train_steps=200_000,
+        num_workers=32,  # 减少工作进程避免资源竞争
     ),
     TrainConfig(
         name="pi05_simpler_low_mem_finetune",
