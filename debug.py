@@ -34,7 +34,7 @@ def preprocess_widowx_proprio(eef_pos) -> np.array:
 # config_name = "pi05_simpler_low_mem_finetune"
 config_name = "pi05_simpler"
 # checkpoint_dir = "/opt/tiger/openpi/checkpoints/pi05_simpler_low_mem_finetune/pi05_simpler_low_mem_finetune/20000"
-checkpoint_dir = "/opt/tiger/openpi/checkpoints/pi05_simpler/pi05_simpler_full_finetune/62000"
+checkpoint_dir = "/opt/tiger/openpi/checkpoints/pi05_simpler/pi05_simpler_full_finetune/70000"
 
 print("Loading OpenPI policy...")
 training_config = _config.get_config(config_name)
@@ -62,7 +62,6 @@ while not (done or truncated):
     # Prepare observation for OpenPI policy
     # Extract robot state from observation
     robot_state = preprocess_widowx_proprio(obs['agent']['eef_pos'])  # Robot joint positions and gripper state
-    import pdb; pdb.set_trace()
     policy_input = {
         'image': image,  # RGB image from SimplerEnv
         'state': robot_state,  # Actual robot state from environment
@@ -87,7 +86,7 @@ while not (done or truncated):
         action_scale = 1.0  # Default action scale
 
         action[-1] = 2.0 * (action[-1] > 0.5) - 1.0
-        action[3:6] = action_rotation_axangle * action_scale
+        # action[3:6] = action_rotation_axangle * action_scale
 
         obs, reward, done, truncated, info = env.step(action) # for long horizon tasks, you can call env.advance_to_next_subtask() to advance to the next subtask; the environment might also autoadvance if env._elapsed_steps is larger than a threshold
 
@@ -98,6 +97,7 @@ while not (done or truncated):
         # Update timestep for each action in the sequence
         timestep += 1
 
+        break
         # Check if episode is done after each action
         if done or truncated:
             break
