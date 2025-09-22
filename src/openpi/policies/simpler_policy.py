@@ -34,13 +34,13 @@ class SimplerInputs(transforms.DataTransformFn):
             "state": data["state"],
             "image": {
                 "base_0_rgb": base_image,
-                "left_wrist_0_rgb": np.zeros_like(base_image),
-                "right_wrist_0_rgb": np.zeros_like(base_image),
+                # "left_wrist_0_rgb": np.zeros_like(base_image),
+                # "right_wrist_0_rgb": np.zeros_like(base_image),
             },
             "image_mask": {
                 "base_0_rgb": np.True_,
-                "left_wrist_0_rgb": np.False_,
-                "right_wrist_0_rgb": np.False_,
+                # "left_wrist_0_rgb": np.False_,
+                # "right_wrist_0_rgb": np.False_,
             },
         }
 

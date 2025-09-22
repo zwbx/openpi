@@ -28,6 +28,10 @@ def preprocess_observation_pytorch(
 
     This function avoids complex type annotations that can cause torch.compile issues.
     """
+    # 根据实际observation中的图像动态设置image_keys
+    if observation.images:
+        image_keys = list(observation.images.keys())
+
     if not set(image_keys).issubset(observation.images):
         raise ValueError(f"images dict missing keys: expected {image_keys}, got {list(observation.images)}")
 

@@ -314,6 +314,7 @@ class LeRobotSimplerDataConfig(DataConfigFactory):
             data_transforms=data_transforms,
             model_transforms=model_transforms,
             action_sequence_keys=("action",),  # Use original dataset field name before repack
+            use_quantile_norm=False,
         )
 
 @dataclasses.dataclass(frozen=True)
@@ -809,6 +810,7 @@ _CONFIGS = [
         num_train_steps=10,
         wandb_enabled=False,
         num_workers=0,
+        pytorch_weight_path=None,  # 不加载权重进行测试
     ),
     TrainConfig(
         name="pi05_simpler",
@@ -824,14 +826,14 @@ _CONFIGS = [
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=1_000,
             peak_lr=5e-5,
-            decay_steps=200_000,
+            decay_steps=100_000,
             decay_lr=5e-5,
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         ema_decay=0.999,
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        # weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         pytorch_weight_path="/dev/shm/pi05_base_pytorch",
-        num_train_steps=200_000,
+        num_train_steps=100_000,
         num_workers=32,  # 减少工作进程避免资源竞争
     ),
     TrainConfig(
