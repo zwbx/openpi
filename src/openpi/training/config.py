@@ -314,7 +314,6 @@ class LeRobotSimplerDataConfig(DataConfigFactory):
             data_transforms=data_transforms,
             model_transforms=model_transforms,
             action_sequence_keys=("action",),  # Use original dataset field name before repack
-            use_quantile_norm=False,
         )
 
 @dataclasses.dataclass(frozen=True)
@@ -800,7 +799,8 @@ _CONFIGS = [
             repo_id="lerobot-pi0-bridge",
             base_config=DataConfig(
                 prompt_from_task=True,
-                dataset_root="/dev/shm/lerobot-pi0-bridge"
+                dataset_root="/dev/shm/lerobot-pi0-bridge",
+                use_quantile_norm=True,
             ),
         ),
         batch_size=2,
@@ -819,7 +819,8 @@ _CONFIGS = [
             repo_id="lerobot-pi0-bridge",
             base_config=DataConfig(
                 prompt_from_task=True,
-                dataset_root="/dev/shm/lerobot-pi0-bridge"
+                dataset_root="/dev/shm/",
+                use_quantile_norm=True,
             ),
         ),
         batch_size=256,
@@ -850,7 +851,8 @@ _CONFIGS = [
             repo_id="lerobot-pi0-bridge",
             base_config=DataConfig(
                 prompt_from_task=True,
-                dataset_root="/dev/shm/lerobot-pi0-bridge"
+                dataset_root="/dev/shm/lerobot-pi0-bridge",
+                use_quantile_norm=True, 
             ),
         ),
         batch_size=256,  # Smaller batch size for low memory
