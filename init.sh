@@ -13,3 +13,7 @@ sudo apt-get update && sudo apt-get install -y ffmpeg
 
 # Fix: ImportError: libGL.so.1: cannot open shared object file: No such file or directory
 sudo apt-get update && sudo apt-get install -y libgl1 libglib2.0-0 libsm6 libxext6 libxrender1
+
+uv pip install numpy==1.24.4 mediapy
+uv pip install -e SimplerEnv/ManiSkill2_real2sim
+uv pip install -e SimplerEnv
