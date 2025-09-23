@@ -7,6 +7,13 @@ from openpi import transforms
 from openpi.models import model as _model
 
 
+def make_simpler_example() -> dict:
+    """Creates a random input example for the Droid policy."""
+    return {
+        "image": np.random.randint(256, size=(224, 224, 3), dtype=np.uint8),
+        "state": np.random.rand(8),
+        "prompt": "do something",
+    }
 
 def _parse_image(image) -> np.ndarray:
     image = np.asarray(image)
