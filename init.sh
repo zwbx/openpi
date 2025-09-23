@@ -17,3 +17,69 @@ sudo apt-get update && sudo apt-get install -y libgl1 libglib2.0-0 libsm6 libxex
 uv pip install numpy==1.24.4 mediapy
 uv pip install -e SimplerEnv/ManiSkill2_real2sim
 uv pip install -e SimplerEnv
+
+
+
+# for SimplerENV rendering
+sudo apt-get install vulkan-tools libvulkan1 xvfb libglvnd-dev -y
+
+
+echo "[2/4] Ensure directories exist"
+sudo mkdir -p /usr/share/vulkan/icd.d
+sudo mkdir -p /usr/share/glvnd/egl_vendor.d
+sudo mkdir -p /etc/vulkan/implicit_layer.d
+
+echo "[3/4] Create or update JSON files"
+
+
+# /usr/share/vulkan/icd.d/nvidia_icd.json
+sudo tee /usr/share/vulkan/icd.d/nvidia_icd.json >/dev/null <<'EOF'
+{
+    "file_format_version" : "1.0.0",
+    "ICD": {
+        "library_path": "libGLX_nvidia.so.0",
+        "api_version" : "1.2.155"
+    }
+}
+EOF
+echo "Wrote /usr/share/vulkan/icd.d/nvidia_icd.json"
+
+# /usr/share/glvnd/egl_vendor.d/10_nvidia.json
+sudo tee /usr/share/glvnd/egl_vendor.d/10_nvidia.json >/dev/null <<'EOF'
+{
+    "file_format_version" : "1.0.0",
+    "ICD" : {
+        "library_path" : "libEGL_nvidia.so.0"
+    }
+}
+EOF
+echo "Wrote /usr/share/glvnd/egl_vendor.d/10_nvidia.json"
+
+# /etc/vulkan/implicit_layer.d/nvidia_layers.json
+sudo tee /etc/vulkan/implicit_layer.d/nvidia_layers.json >/dev/null <<'EOF'
+{
+    "file_format_version" : "1.0.0",
+    "layer": {
+        "name": "VK_LAYER_NV_optimus",
+        "type": "INSTANCE",
+        "library_path": "libGLX_nvidia.so.0",
+        "api_version" : "1.2.155",
+        "implementation_version" : "1",
+        "description" : "NVIDIA Optimus layer",
+        "functions": {
+            "vkGetInstanceProcAddr": "vk_optimusGetInstanceProcAddr",
+            "vkGetDeviceProcAddr": "vk_optimusGetDeviceProcAddr"
+        },
+        "enable_environment": {
+            "__NV_PRIME_RENDER_OFFLOAD": "1"
+        },
+        "disable_environment": {
+            "DISABLE_LAYER_NV_OPTIMUS_1": ""
+        }
+    }
+}
+EOF
+echo "Wrote /etc/vulkan/implicit_layer.d/nvidia_layers.json"
+
+uv pip install sapien
+uv run python -m sapien.example.offscreen
