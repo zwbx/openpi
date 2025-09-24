@@ -819,7 +819,7 @@ _CONFIGS = [
             repo_id="lerobot-pi0-bridge",
             base_config=DataConfig(
                 prompt_from_task=True,
-                dataset_root="/dev/shm/",
+                dataset_root="/dev/shm/lerobot-pi0-bridge",
                 use_quantile_norm=True,
             ),
         ),
