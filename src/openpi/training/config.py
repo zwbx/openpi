@@ -819,8 +819,33 @@ _CONFIGS = [
             repo_id="lerobot-pi0-bridge",
             base_config=DataConfig(
                 prompt_from_task=True,
-                dataset_root="/dev/shm/",
+                dataset_root="/dev/shm/lerobot-pi0-bridge",
                 use_quantile_norm=True,
+            ),
+        ),
+        batch_size=256,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=100_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        # weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        pytorch_weight_path="/dev/shm/pi05_base_pytorch",
+        num_train_steps=100_000,
+        num_workers=32,  # 减少工作进程避免资源竞争
+    ),
+    TrainConfig(
+        name="pi05_simpler_zscore",
+        model=pi0_config.Pi0Config(pi05=True,discrete_state_input=True),
+        data=LeRobotSimplerDataConfig(
+            repo_id="lerobot-pi0-bridge",
+            base_config=DataConfig(
+                prompt_from_task=True,
+                dataset_root="/dev/shm/lerobot-pi0-bridge",
+                use_quantile_norm=False,
             ),
         ),
         batch_size=256,
