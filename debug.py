@@ -34,7 +34,7 @@ def preprocess_widowx_proprio(eef_pos) -> np.array:
 # config_name = "pi05_simpler_low_mem_finetune"
 config_name = "pi05_simpler"
 # checkpoint_dir = "/opt/tiger/openpi/checkpoints/pi05_simpler_low_mem_finetune/pi05_simpler_low_mem_finetune/20000"
-checkpoint_dir = "/opt/tiger/openpi/checkpoints/pi05_simpler/pi05_simpler/23000"
+checkpoint_dir = "/mnt/hdfs/wenbo/vla/pi05_simpler_28000/"
 
 print("Loading OpenPI policy...")
 training_config = _config.get_config(config_name)
@@ -58,7 +58,7 @@ while not (done or truncated):
    # action[:3]: delta xyz; action[3:6]: delta rotation in axis-angle representation;
    # action[6:7]: gripper (the meaning of open / close depends on robot URDF)
 
-
+    # import pdb; pdb.set_trace()
     # Prepare observation for OpenPI policy
     # Extract robot state from observation
     robot_state = preprocess_widowx_proprio(obs['agent']['eef_pos'])  # Robot joint positions and gripper state
