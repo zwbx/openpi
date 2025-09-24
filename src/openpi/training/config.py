@@ -82,7 +82,7 @@ class DataConfig:
     # Model specific transforms. Will be applied after the data is normalized.
     model_transforms: _transforms.Group = dataclasses.field(default_factory=_transforms.Group)
     # If true, will use quantile normalization. Otherwise, normal z-score normalization will be used.
-    use_quantile_norm: bool = False
+    use_quantile_norm: bool | None = None  # comment: 是否使用分位数归一化，支持 bool 或 None，None 表示未指定
 
     # Names of keys that will be used by the data loader to generate the action sequence. The length of the
     # sequence is defined by the `action_horizon` field in the model config. This should be adjusted if your
@@ -186,7 +186,7 @@ class DataConfigFactory(abc.ABC):
             repo_id=repo_id,
             asset_id=asset_id,
             norm_stats=self._load_norm_stats(epath.Path(self.assets.assets_dir or assets_dirs), asset_id),
-            use_quantile_norm=model_config.model_type != ModelType.PI0,
+            use_quantile_norm=model_config.model_type != ModelType.PI0 if self.base_config is None else self.base_config.use_quantile_norm,
         )
 
     def _load_norm_stats(self, assets_dir: epath.Path, asset_id: str | None) -> dict[str, _transforms.NormStats] | None:
@@ -314,7 +314,6 @@ class LeRobotSimplerDataConfig(DataConfigFactory):
             data_transforms=data_transforms,
             model_transforms=model_transforms,
             action_sequence_keys=("action",),  # Use original dataset field name before repack
-            use_quantile_norm=False,
         )
 
 @dataclasses.dataclass(frozen=True)
