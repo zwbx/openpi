@@ -839,7 +839,7 @@ _CONFIGS = [
     ),
     TrainConfig(
         name="pi05_simpler_zscore",
-        model=pi0_config.Pi0Config(pi05=True,discrete_state_input=True),
+        model=pi0_config.Pi0Config(pi05=True,action_horizon=4,discrete_state_input=True),
         data=LeRobotSimplerDataConfig(
             repo_id="lerobot-pi0-bridge",
             base_config=DataConfig(
@@ -848,7 +848,7 @@ _CONFIGS = [
                 use_quantile_norm=False,
             ),
         ),
-        batch_size=256,
+        batch_size=2,
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=1_000,
             peak_lr=5e-5,
