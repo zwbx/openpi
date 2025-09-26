@@ -91,4 +91,4 @@ cp -r /mnt/hdfs/wenbo/vla/pi05/pi05_base_pytorch /dev/shm/
 cp -r /mnt/hdfs/wenbo/vla/lerobot-pi0-bridge.tar /opt/tiger/openpi/
 
 # untar dataset
-tar -xvf /mnt/hdfs/wenbo/vla/lerobot-pi0-bridge.tar -C /dev/shm/
+tar -xvf /opt/tiger/openpi/lerobot-pi0-bridge.tar -C /dev/shm/
