@@ -848,7 +848,7 @@ _CONFIGS = [
                 use_quantile_norm=False,
             ),
         ),
-        batch_size=2,
+        batch_size=256,
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=1_000,
             peak_lr=5e-5,
