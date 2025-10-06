@@ -1,10 +1,12 @@
 lerobot-pi0-bridge.tar
 lerobot-pi0-bridge/
 ckpt/
+checkpoints/
 *.mp4
 here/
 pi05_base/
 pi05_base_pytorch/
+
 # Data directories.
 
 checkpoints/

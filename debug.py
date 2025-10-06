@@ -32,9 +32,11 @@ def preprocess_widowx_proprio(eef_pos) -> np.array:
 
 # Initialize OpenPI policy
 # config_name = "pi05_simpler_low_mem_finetune"
-config_name = "pi05_simpler"
+config_name = "pi05_simpler_zscore"
 # checkpoint_dir = "/opt/tiger/openpi/checkpoints/pi05_simpler_low_mem_finetune/pi05_simpler_low_mem_finetune/20000"
-checkpoint_dir = "/mnt/hdfs/wenbo/vla/pi05_simpler_28000/"
+# checkpoint_dir = "/opt/tiger/openpi/63000"
+# checkpoint_dir = "/opt/tiger/openpi/pi05_simpler_28000"
+checkpoint_dir = "/opt/tiger/openpi/63000"
 
 print("Loading OpenPI policy...")
 training_config = _config.get_config(config_name)

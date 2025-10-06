@@ -82,7 +82,7 @@ class DataConfig:
     # Model specific transforms. Will be applied after the data is normalized.
     model_transforms: _transforms.Group = dataclasses.field(default_factory=_transforms.Group)
     # If true, will use quantile normalization. Otherwise, normal z-score normalization will be used.
-    use_quantile_norm: bool = False
+    use_quantile_norm: bool | None = None  # comment: 是否使用分位数归一化，支持 bool 或 None，None 表示未指定
 
     # Names of keys that will be used by the data loader to generate the action sequence. The length of the
     # sequence is defined by the `action_horizon` field in the model config. This should be adjusted if your
@@ -186,7 +186,7 @@ class DataConfigFactory(abc.ABC):
             repo_id=repo_id,
             asset_id=asset_id,
             norm_stats=self._load_norm_stats(epath.Path(self.assets.assets_dir or assets_dirs), asset_id),
-            use_quantile_norm=model_config.model_type != ModelType.PI0,
+            use_quantile_norm=model_config.model_type != ModelType.PI0 if self.base_config.use_quantile_norm is None else self.base_config.use_quantile_norm,
         )
 
     def _load_norm_stats(self, assets_dir: epath.Path, asset_id: str | None) -> dict[str, _transforms.NormStats] | None:
@@ -824,6 +824,31 @@ _CONFIGS = [
             ),
         ),
         batch_size=256,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=100_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        # weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        pytorch_weight_path="/dev/shm/pi05_base_pytorch",
+        num_train_steps=100_000,
+        num_workers=32,  # 减少工作进程避免资源竞争
+    ),
+    TrainConfig(
+        name="pi05_simpler_zscore",
+        model=pi0_config.Pi0Config(pi05=True,action_horizon=4,discrete_state_input=True),
+        data=LeRobotSimplerDataConfig(
+            repo_id="lerobot-pi0-bridge",
+            base_config=DataConfig(
+                prompt_from_task=True,
+                dataset_root="/dev/shm/lerobot-pi0-bridge",
+                use_quantile_norm=False,
+            ),
+        ),
+        batch_size=1024,
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=1_000,
             peak_lr=5e-5,
