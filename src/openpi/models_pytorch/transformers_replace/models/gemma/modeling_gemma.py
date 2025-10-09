@@ -346,7 +346,11 @@ class GemmaDecoderLayer(GradientCheckpointingLayer):
         self.use_ttt = getattr(config, 'use_ttt', False)
         if self.use_ttt:
             ttt_positions = getattr(config, 'ttt_layer_positions', None)
-            should_use_ttt = ttt_positions is None or layer_idx in ttt_positions
+            # Support "all" string to apply TTT to all layers
+            if ttt_positions == "all" or ttt_positions is None:
+                should_use_ttt = True
+            else:
+                should_use_ttt = layer_idx in ttt_positions
 
             if should_use_ttt:
                 # Import TTTWithAdaptiveNorm from our new module
@@ -365,7 +369,8 @@ class GemmaDecoderLayer(GradientCheckpointingLayer):
                     rope_theta=config.rope_theta,
                     use_adarms=getattr(config, 'use_adarms', False),
                     adarms_cond_dim=cond_dim,
-                    eps=config.rms_norm_eps
+                    eps=config.rms_norm_eps,
+                    use_dual_form=getattr(config, 'use_dual_form', True),
                 )
             else:
                 self.ttt_layer = None

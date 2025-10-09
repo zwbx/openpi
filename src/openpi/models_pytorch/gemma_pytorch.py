@@ -16,6 +16,9 @@ class PaliGemmaWithExpertModel(nn.Module):
         action_expert_config,
         use_adarms=None,
         precision: Literal["bfloat16", "float32"] = "bfloat16",
+        use_ttt: bool = False,
+        ttt_layer_positions: list = None,
+        use_dual_form: bool = True,
     ):
         if use_adarms is None:
             use_adarms = [False, False]
@@ -52,6 +55,9 @@ class PaliGemmaWithExpertModel(nn.Module):
             torch_dtype="float32",
             use_adarms=use_adarms[1],
             adarms_cond_dim=action_expert_config.width if use_adarms[1] else None,
+            use_ttt=use_ttt,
+            ttt_layer_positions=ttt_layer_positions,
+            use_dual_form=use_dual_form,
         )
 
         self.paligemma = PaliGemmaForConditionalGeneration(config=vlm_config_hf)

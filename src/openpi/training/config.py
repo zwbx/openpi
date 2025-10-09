@@ -838,6 +838,35 @@ _CONFIGS = [
         num_workers=32,  # 减少工作进程避免资源竞争
     ),
     TrainConfig(
+        name="pi05_simpler_zscore_ttt",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            discrete_state_input=True,
+            use_ttt=True,
+            ttt_layer_positions="all",  # Apply TTT to all layers; can also use list like [14, 15, 16, 17] for specific layers
+        ),
+        data=LeRobotSimplerDataConfig(
+            repo_id="lerobot-pi0-bridge",
+            base_config=DataConfig(
+                prompt_from_task=True,
+                dataset_root="/dev/shm/lerobot-pi0-bridge",
+                use_quantile_norm=False,
+            ),
+        ),
+        batch_size=256,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=100_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        pytorch_weight_path="/dev/shm/pi05_base_pytorch",
+        num_train_steps=100_000,
+        num_workers=32,
+    ),
+    TrainConfig(
         name="pi05_simpler_zscore",
         model=pi0_config.Pi0Config(pi05=True,action_horizon=4,discrete_state_input=True),
         data=LeRobotSimplerDataConfig(

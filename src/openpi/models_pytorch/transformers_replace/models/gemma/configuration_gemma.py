@@ -93,6 +93,8 @@ class GemmaConfig(PretrainedConfig):
             How to integrate TTT layer. Options: "replace_attn", "after_attn", "parallel_attn".
         ttt_layer_positions (`list`, *optional*, defaults to `None`):
             List of layer indices where TTT should be inserted. If None, TTT is added to all layers.
+        use_dual_form (`bool`, *optional*, defaults to `True`):
+            Whether to use dual form for TTT optimization (more memory efficient).
     ```python
     >>> from transformers import GemmaModel, GemmaConfig
     >>> # Initializing a Gemma gemma-7b style configuration
@@ -148,6 +150,7 @@ class GemmaConfig(PretrainedConfig):
         ttt_mini_batch_size: int = 64,
         ttt_mode: str = "after_attn",
         ttt_layer_positions: Optional[list] = None,
+        use_dual_form: bool = True,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -172,6 +175,7 @@ class GemmaConfig(PretrainedConfig):
         self.ttt_mini_batch_size = ttt_mini_batch_size
         self.ttt_mode = ttt_mode
         self.ttt_layer_positions = ttt_layer_positions
+        self.use_dual_form = use_dual_form
 
         # Set default for adarms_cond_dim if use_adarms is True
         if self.use_adarms and self.adarms_cond_dim is None:

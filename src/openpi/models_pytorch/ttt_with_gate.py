@@ -130,6 +130,7 @@ class TTTWithAdaptiveNorm(nn.Module):
         use_adarms: bool = False,
         adarms_cond_dim: Optional[int] = None,
         eps: float = 1e-6,
+        use_dual_form: bool = True,  # Whether to use dual form (more memory efficient)
     ):
         super().__init__()
         self.num_heads = num_heads
@@ -138,6 +139,7 @@ class TTTWithAdaptiveNorm(nn.Module):
         self.use_adarms = use_adarms
         self.adarms_cond_dim = adarms_cond_dim
         self.eps = eps
+        self.use_dual_form = use_dual_form
 
         # Initialize Q/K/V/O projections
         self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
@@ -236,18 +238,34 @@ class TTTWithAdaptiveNorm(nn.Module):
         ln_bias = self.ttt_norm_bias.reshape(1, num_heads, 1, head_dim)
         grad_l_wrt_Z1 = ln_fused_l2_bwd(Z1, reconstruction_target, ln_weight, ln_bias)
 
-        # Batch-parallel gradient descent on W and b
-        # Gradient: dL/dW = X1^T @ grad_l_wrt_Z1
-        grad_W1 = torch.einsum("bhld,bhlf->bhdf", X1, grad_l_wrt_Z1)  # [B, num_heads, head_dim, head_dim]
-        grad_b1 = grad_l_wrt_Z1.sum(dim=2, keepdim=True)  # [B, num_heads, 1, head_dim]
+        if self.use_dual_form:
+            # Dual form: more memory efficient, avoids storing grad_W1
+            # Compute attention matrix: [B, num_heads, L, L]
+            Attn1 = torch.tril(XQ @ X1.transpose(-2, -1))
 
-        # Update W and b
-        W1_updated = W1_init - eta * grad_W1
-        b1_updated = b1_init - eta * grad_b1
+            # Compute b1_bar: [B, num_heads, 1, head_dim]
+            # b1_bar = b1_init - eta * sum(grad_l_wrt_Z1)
+            b1_bar = b1_init - eta * grad_l_wrt_Z1.sum(dim=2, keepdim=True)
 
-        # Forward with updated parameters
-        Z1_updated = torch.einsum("bhld,bhdf->bhlf", XQ, W1_updated) + b1_updated
-        Z1_normalized = ln_fwd(Z1_updated, ln_weight, ln_bias)
+            # Compute Z1_bar directly without explicitly updating W1
+            # Z1_bar = XQ @ W1_init - eta * Attn1 @ grad_l_wrt_Z1 + b1_bar
+            # [B, num_heads, L, head_dim]
+            Z1_bar = XQ @ W1_init - (eta * Attn1) @ grad_l_wrt_Z1 + b1_bar
+        else:
+            # Primal form: explicitly compute gradients and update parameters
+            # Gradient: dL/dW = X1^T @ grad_l_wrt_Z1
+            grad_W1 = torch.einsum("bhld,bhlf->bhdf", X1, grad_l_wrt_Z1)  # [B, num_heads, head_dim, head_dim]
+            grad_b1 = grad_l_wrt_Z1.sum(dim=2, keepdim=True)  # [B, num_heads, 1, head_dim]
+
+            # Update W and b
+            W1_updated = W1_init - eta * grad_W1
+            b1_updated = b1_init - eta * grad_b1
+
+            # Forward with updated parameters
+            Z1_bar = torch.einsum("bhld,bhdf->bhlf", XQ, W1_updated) + b1_updated
+
+        # Normalize
+        Z1_normalized = ln_fwd(Z1_bar, ln_weight, ln_bias)
 
         # Output with residual
         output = XQ + Z1_normalized  # [B, num_heads, L, head_dim]

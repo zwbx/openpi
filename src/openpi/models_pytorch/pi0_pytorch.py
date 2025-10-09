@@ -95,6 +95,9 @@ class PI0Pytorch(nn.Module):
             action_expert_config,
             use_adarms=[False, True] if self.pi05 else [False, False],
             precision=config.dtype,
+            use_ttt=getattr(config, 'use_ttt', False),
+            ttt_layer_positions=getattr(config, 'ttt_layer_positions', None),
+            use_dual_form=getattr(config, 'use_dual_form', True),
         )
 
         self.action_in_proj = nn.Linear(32, action_expert_config.width)

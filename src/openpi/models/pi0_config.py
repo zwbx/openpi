@@ -32,6 +32,11 @@ class Pi0Config(_model.BaseModelConfig):
     # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
     discrete_state_input: bool = None  # type: ignore
 
+    # TTT (Test-Time Training) layer configuration
+    use_ttt: bool = False
+    ttt_layer_positions: list = None  # type: ignore  # List of layer indices where TTT should be applied
+    use_dual_form: bool = True  # Whether to use dual form for TTT (more memory efficient)
+
     def __post_init__(self):
         if self.max_token_len is None:
             object.__setattr__(self, "max_token_len", 200 if self.pi05 else 48)
