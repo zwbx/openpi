@@ -85,6 +85,14 @@ class GemmaConfig(PretrainedConfig):
             Whether to use ADARMS.
         adarms_cond_dim (`int`, *optional*, defaults to `None`):
             The dimension of the ADARMS condition.
+        use_ttt (`bool`, *optional*, defaults to `False`):
+            Whether to use TTT (Test-Time Training) layer.
+        ttt_mini_batch_size (`int`, *optional*, defaults to 64):
+            Mini-batch size for TTT layer.
+        ttt_mode (`str`, *optional*, defaults to "after_attn"):
+            How to integrate TTT layer. Options: "replace_attn", "after_attn", "parallel_attn".
+        ttt_layer_positions (`list`, *optional*, defaults to `None`):
+            List of layer indices where TTT should be inserted. If None, TTT is added to all layers.
     ```python
     >>> from transformers import GemmaModel, GemmaConfig
     >>> # Initializing a Gemma gemma-7b style configuration
@@ -136,6 +144,10 @@ class GemmaConfig(PretrainedConfig):
         attention_dropout=0.0,
         use_adarms: bool = False,
         adarms_cond_dim: Optional[int] = None,
+        use_ttt: bool = False,
+        ttt_mini_batch_size: int = 64,
+        ttt_mode: str = "after_attn",
+        ttt_layer_positions: Optional[list] = None,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -156,6 +168,10 @@ class GemmaConfig(PretrainedConfig):
         self.attention_dropout = attention_dropout
         self.use_adarms = use_adarms
         self.adarms_cond_dim = adarms_cond_dim
+        self.use_ttt = use_ttt
+        self.ttt_mini_batch_size = ttt_mini_batch_size
+        self.ttt_mode = ttt_mode
+        self.ttt_layer_positions = ttt_layer_positions
 
         # Set default for adarms_cond_dim if use_adarms is True
         if self.use_adarms and self.adarms_cond_dim is None:
