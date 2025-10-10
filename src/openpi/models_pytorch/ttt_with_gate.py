@@ -147,22 +147,6 @@ class TTTWithAdaptiveNorm(nn.Module):
         self.v_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
         self.o_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
 
-        # Initialize TTT learning rate gate
-        linear_weight_data = nn.Linear(self.hidden_size, 1, bias=True).weight.data
-        self.learnable_ttt_lr_weight = nn.Parameter(
-            torch.stack(
-                [torch.normal(0, 0.02, size=linear_weight_data.shape) for _ in range(self.num_heads)],
-                dim=0,
-            )
-        )
-        linear_bias_data = nn.Linear(self.hidden_size, 1, bias=True).bias.data
-        self.learnable_ttt_lr_bias = nn.Parameter(
-            torch.stack(
-                [torch.zeros_like(linear_bias_data) for _ in range(self.num_heads)],
-                dim=0,
-            )
-        )
-
         # Initialize TTT LayerNorm parameters
         ln_weight_data = nn.LayerNorm(self.head_dim).weight.data
         ln_bias_data = nn.LayerNorm(self.head_dim).bias.data
@@ -220,13 +204,9 @@ class TTTWithAdaptiveNorm(nn.Module):
         # [B, num_heads, 1, head_dim]
         b1_init = self.b1.unsqueeze(0).expand(B, -1, -1, -1).clone()
 
-        # Compute learning rate eta (batch-level, uniform across sequence)
-        # Simplified: use average X to compute a single eta per batch sample
-        X_mean = X.mean(dim=1)  # [B, hidden_size]
-        # [B, num_heads, 1, 1]
-        ttt_lr = torch.einsum("bc,hdc->bhd", X_mean, self.learnable_ttt_lr_weight) + self.learnable_ttt_lr_bias
-        ttt_lr = F.sigmoid(ttt_lr).unsqueeze(-1)  # [B, num_heads, 1, 1]
-        eta = self.ttt_base_lr * ttt_lr / head_dim  # Scalar eta per batch sample per head
+        # Learning rate for closed-form solution
+        # Since we use dual form with closed-form solution, eta is fixed
+        eta = self.ttt_base_lr / head_dim  # Scalar eta
 
         # TTT optimization: minimize reconstruction error
         X1 = XK  # [B, num_heads, L, head_dim]

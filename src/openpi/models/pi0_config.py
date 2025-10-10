@@ -34,8 +34,9 @@ class Pi0Config(_model.BaseModelConfig):
 
     # TTT (Test-Time Training) layer configuration
     use_ttt: bool = False
+    ttt_layer_type: str = "linear"  # Type of TTT layer: "linear" (closed-form solution)
     ttt_layer_positions: list = None  # type: ignore  # List of layer indices where TTT should be applied
-    use_dual_form: bool = True  # Whether to use dual form for TTT (more memory efficient)
+    use_dual_form: bool = True  # Whether to use dual form for TTT (closed-form solution, more memory efficient)
 
     def __post_init__(self):
         if self.max_token_len is None:
