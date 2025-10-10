@@ -843,6 +843,7 @@ _CONFIGS = [
             pi05=True,
             discrete_state_input=True,
             use_ttt=True,
+            ttt_layer_type="linear",  # Linear TTT with closed-form solution (dual form)
             ttt_layer_positions="all",  # Apply TTT to all layers; can also use list like [14, 15, 16, 17] for specific layers
         ),
         data=LeRobotSimplerDataConfig(
