@@ -97,6 +97,8 @@ class GemmaConfig(PretrainedConfig):
             List of layer indices where TTT should be inserted. If None, TTT is added to all layers.
         use_dual_form (`bool`, *optional*, defaults to `True`):
             Whether to use dual form for TTT optimization (closed-form solution, more memory efficient).
+        ttt_base_lr (`float`, *optional*, defaults to 1.0):
+            Base learning rate for TTT layer (1.0 for linear, 0.1 for MLP).
     ```python
     >>> from transformers import GemmaModel, GemmaConfig
     >>> # Initializing a Gemma gemma-7b style configuration
@@ -154,6 +156,7 @@ class GemmaConfig(PretrainedConfig):
         ttt_mode: str = "after_attn",
         ttt_layer_positions: Optional[list] = None,
         use_dual_form: bool = True,
+        ttt_base_lr: float = 1.0,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -180,6 +183,7 @@ class GemmaConfig(PretrainedConfig):
         self.ttt_mode = ttt_mode
         self.ttt_layer_positions = ttt_layer_positions
         self.use_dual_form = use_dual_form
+        self.ttt_base_lr = ttt_base_lr
 
         # Set default for adarms_cond_dim if use_adarms is True
         if self.use_adarms and self.adarms_cond_dim is None:

@@ -443,10 +443,24 @@ def train_loop(config: _config.TrainConfig):
         logging.info(f"Loading weights from: {config.pytorch_weight_path}")
 
         model_path = os.path.join(config.pytorch_weight_path, "model.safetensors")
-        safetensors.torch.load_model(
-            (model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model), model_path
-        )
-        logging.info(f"Loaded PyTorch weights from {config.pytorch_weight_path}")
+        model_to_load = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
+
+        # Load checkpoint with strict=False to allow missing TTT parameters
+        state_dict = safetensors.torch.load_file(model_path)
+        missing_keys, unexpected_keys = model_to_load.load_state_dict(state_dict, strict=False)
+
+        if missing_keys:
+            logging.info(f"Missing keys (will be randomly initialized): {len(missing_keys)} keys")
+            # Only log first few missing keys to avoid cluttering logs
+            for key in missing_keys[:5]:
+                logging.info(f"  - {key}")
+            if len(missing_keys) > 5:
+                logging.info(f"  ... and {len(missing_keys) - 5} more keys")
+
+        if unexpected_keys:
+            logging.warning(f"Unexpected keys in checkpoint: {unexpected_keys[:10]}")
+
+        logging.info(f"Loaded PyTorch weights from {config.pytorch_weight_path} (strict=False)")
 
     # Optimizer + learning rate schedule from config
     warmup_steps = config.lr_schedule.warmup_steps

@@ -11,9 +11,8 @@ Based on the original TTTLinear implementation from ttt.py, but adapted to:
 4. Batch-parallel optimization (no sequential scan, no position IDs)
 """
 
-from typing import Optional, Dict, Tuple
+from typing import Optional, Tuple
 import torch
-import torch.nn.functional as F
 from torch import nn
 
 
@@ -106,19 +105,22 @@ class GemmaRMSNorm(nn.Module):
 
 class TTTWithAdaptiveNorm(nn.Module):
     """
-    TTT Layer with Adaptive RMSNorm integrated.
+    TTT Layer with learnable gating mechanism.
 
-    This class combines TTTLinear functionality with adaptive normalization
-    that can be conditioned on diffusion timestep.
+    This class combines TTTLinear functionality with a learnable per-dimension gate
+    similar to ttt-video-dit's SSMGating.
 
     Args:
         num_heads: Number of attention heads
         hidden_size: Hidden dimension size
         mini_batch_size: Mini-batch size for TTT optimization (not used in batch-parallel mode)
         rope_theta: RoPE theta parameter (not used in batch-parallel mode)
-        use_adarms: Whether to use adaptive RMS normalization
+        use_adarms: Whether to use adaptive RMS normalization for dynamic gating
         adarms_cond_dim: Dimension of the adaptive condition (timestep embedding)
         eps: Epsilon for normalization stability
+        use_dual_form: Whether to use dual form (more memory efficient)
+        gating_alpha_init: Initial value for learnable gating alpha (default 0.1)
+        ttt_base_lr: Base learning rate for TTT (default 1.0 for linear, 0.1 for MLP)
     """
 
     def __init__(
@@ -131,6 +133,8 @@ class TTTWithAdaptiveNorm(nn.Module):
         adarms_cond_dim: Optional[int] = None,
         eps: float = 1e-6,
         use_dual_form: bool = True,  # Whether to use dual form (more memory efficient)
+        gating_alpha_init: float = 0.1,  # Initial value for learnable gate
+        ttt_base_lr: float = 1.0,  # Base learning rate for TTT (1.0 for linear, 0.1 for MLP)
     ):
         super().__init__()
         self.num_heads = num_heads
@@ -140,6 +144,7 @@ class TTTWithAdaptiveNorm(nn.Module):
         self.adarms_cond_dim = adarms_cond_dim
         self.eps = eps
         self.use_dual_form = use_dual_form
+        self.ttt_base_lr = ttt_base_lr
 
         # Initialize Q/K/V/O projections
         self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
@@ -155,18 +160,29 @@ class TTTWithAdaptiveNorm(nn.Module):
 
         # Post normalization and output projection
         self.post_norm = nn.LayerNorm(self.hidden_size, eps=self.eps)
-        self.ttt_base_lr = 1.0
 
         # TTT model parameters
         self.W1 = nn.Parameter(torch.normal(0, 0.02, size=(self.num_heads, self.head_dim, self.head_dim)))
         self.b1 = nn.Parameter(torch.zeros(self.num_heads, 1, self.head_dim))
 
-        # Adaptive RMS normalization (use GemmaRMSNorm for consistency with GemmaDecoderLayer)
-        self.input_norm = GemmaRMSNorm(
-            dim=hidden_size,
-            eps=eps,
-            cond_dim=adarms_cond_dim if (use_adarms and adarms_cond_dim is not None) else None
+        # Learnable TTT learning rate (input-dependent)
+        # [num_heads, hidden_size, 1]
+        self.learnable_ttt_lr_weight = nn.Parameter(
+            torch.normal(0, 0.02, size=(self.num_heads, self.hidden_size, 1))
         )
+        # [num_heads, 1]
+        self.learnable_ttt_lr_bias = nn.Parameter(torch.zeros(self.num_heads, 1))
+
+        # Learnable gating (similar to ttt-video-dit SSMGating)
+        # Initialize with gating_alpha_init (e.g., 0.1) so tanh(0.1) ≈ 0.1 at start
+        self.gating_alpha = nn.Parameter(torch.ones(hidden_size) * gating_alpha_init)
+
+        # Optional: Adaptive RMS normalization for dynamic gating (if use_adarms=True)
+        if use_adarms and adarms_cond_dim is not None:
+            self.adarms_gate_dense = nn.Linear(adarms_cond_dim, hidden_size, bias=True)
+            nn.init.zeros_(self.adarms_gate_dense.weight)
+        else:
+            self.adarms_gate_dense = None
 
 
     def get_qkv_projections(self, hidden_states):
@@ -181,7 +197,7 @@ class TTTWithAdaptiveNorm(nn.Module):
         XQ: torch.Tensor,
         XK: torch.Tensor,
         XV: torch.Tensor,
-        X: torch.Tensor,
+        hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         """
         Batch-parallel TTT optimization for denoising.
@@ -191,7 +207,7 @@ class TTTWithAdaptiveNorm(nn.Module):
 
         Args:
             XQ, XK, XV: Query, Key, Value projections [B, num_heads, L, head_dim]
-            X: Original hidden states [B, L, hidden_size]
+            hidden_states: Original input for computing adaptive learning rate [B, L, hidden_size]
 
         Returns:
             Output tensor [B, num_heads, L, head_dim]
@@ -204,9 +220,15 @@ class TTTWithAdaptiveNorm(nn.Module):
         # [B, num_heads, 1, head_dim]
         b1_init = self.b1.unsqueeze(0).expand(B, -1, -1, -1).clone()
 
-        # Learning rate for closed-form solution
-        # Since we use dual form with closed-form solution, eta is fixed
-        eta = self.ttt_base_lr / head_dim  # Scalar eta
+        # Compute learnable, input-dependent learning rate (ttt_lr_eta)
+        # [B, L, hidden_size] @ [num_heads, hidden_size, 1] -> [B, num_heads, L, 1]
+        ttt_lr = torch.einsum("blc,hci->bhli", hidden_states, self.learnable_ttt_lr_weight)
+        ttt_lr = ttt_lr + self.learnable_ttt_lr_bias.reshape(1, -1, 1, 1)  # [B, num_heads, L, 1]
+        ttt_lr = torch.sigmoid(ttt_lr)  # Ensure positive, in range (0, 1)
+
+        # Scale by base learning rate and head dimension
+        # [B, num_heads, L, 1]
+        eta = self.ttt_base_lr * ttt_lr / head_dim
 
         # TTT optimization: minimize reconstruction error
         X1 = XK  # [B, num_heads, L, head_dim]
@@ -221,16 +243,18 @@ class TTTWithAdaptiveNorm(nn.Module):
         if self.use_dual_form:
             # Dual form: more memory efficient, avoids storing grad_W1
             # Compute attention matrix: [B, num_heads, L, L]
-            Attn1 = torch.tril(XQ @ X1.transpose(-2, -1))
+            # No causal masking - allow full token interactions for denoising
+            Attn1 = XQ @ X1.transpose(-2, -1)
 
             # Compute b1_bar: [B, num_heads, 1, head_dim]
-            # b1_bar = b1_init - eta * sum(grad_l_wrt_Z1)
-            b1_bar = b1_init - eta * grad_l_wrt_Z1.sum(dim=2, keepdim=True)
+            # b1_bar = b1_init - sum(eta * grad_l_wrt_Z1)
+            # eta: [B, num_heads, L, 1], grad_l_wrt_Z1: [B, num_heads, L, head_dim]
+            b1_bar = b1_init - (eta * grad_l_wrt_Z1).sum(dim=2, keepdim=True)
 
             # Compute Z1_bar directly without explicitly updating W1
-            # Z1_bar = XQ @ W1_init - eta * Attn1 @ grad_l_wrt_Z1 + b1_bar
+            # Z1_bar = XQ @ W1_init - Attn1 @ (eta * grad_l_wrt_Z1) + b1_bar
             # [B, num_heads, L, head_dim]
-            Z1_bar = XQ @ W1_init - (eta * Attn1) @ grad_l_wrt_Z1 + b1_bar
+            Z1_bar = XQ @ W1_init - Attn1 @ (eta * grad_l_wrt_Z1) + b1_bar
         else:
             # Primal form: explicitly compute gradients and update parameters
             # Gradient: dL/dW = X1^T @ grad_l_wrt_Z1
@@ -259,26 +283,23 @@ class TTTWithAdaptiveNorm(nn.Module):
         cache_params: Optional[object] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
-        Forward pass with integrated adaptive normalization.
+        Forward pass with learnable gating.
 
         Args:
-            hidden_states: Input tensor [B, L, hidden_size]
+            hidden_states: Input tensor [B, L, hidden_size] (already from attention output)
             adarms_cond: Adaptive condition (timestep embedding) [B, cond_dim]
             cache_params: Cache parameters (not used in batch denoising mode)
 
         Returns:
             Tuple of (ttt_output, gate):
                 - ttt_output: TTT layer output [B, L, hidden_size]
-                - gate: Adaptive gate [B, 1] or None if not using adarms
+                - gate: Gating values [B, L, hidden_size] or [hidden_size]
         """
-        # Step 1: Apply Adaptive RMS normalization (returns normalized_states and gate)
-        normalized_hidden_states, gate = self.input_norm(hidden_states, adarms_cond)
+        # Run batch-parallel TTT (no position encoding, no scan)
+        B, L = hidden_states.shape[:2]
 
-        # Step 3: Run batch-parallel TTT (no position encoding, no scan)
-        B, L = normalized_hidden_states.shape[:2]
-
-        # Get Q, K, V projections
-        XQ, XK, XV = self.get_qkv_projections(normalized_hidden_states)
+        # Get Q, K, V projections directly from input (no norm needed)
+        XQ, XK, XV = self.get_qkv_projections(hidden_states)
 
         # Reshape to [B, num_heads, L, head_dim]
         XQ = XQ.reshape(B, L, self.num_heads, self.head_dim).transpose(1, 2)
@@ -286,7 +307,7 @@ class TTTWithAdaptiveNorm(nn.Module):
         XV = XV.reshape(B, L, self.num_heads, self.head_dim).transpose(1, 2)
 
         # Batch-parallel TTT optimization (each sample maintains its own W)
-        output = self.ttt_batch_parallel(XQ, XK, XV, normalized_hidden_states)
+        output = self.ttt_batch_parallel(XQ, XK, XV, hidden_states)
 
         # Reshape back: [B, num_heads, L, head_dim] -> [B, L, hidden_size]
         output = output.transpose(1, 2).reshape(B, L, self.hidden_size)
@@ -295,7 +316,11 @@ class TTTWithAdaptiveNorm(nn.Module):
         output = self.post_norm(output)
         output = self.o_proj(output)
 
-        return output, gate
+        # Compute gating: learnable base gate + optional dynamic gate from adarms
+        # Base learnable gate (similar to ttt-video-dit SSMGating)
+        gating_alpha = torch.tanh(self.gating_alpha)  # [hidden_size], values in [-1, 1]
+
+        return output, gating_alpha
 
 
 if __name__ == "__main__":
@@ -338,9 +363,11 @@ if __name__ == "__main__":
     # Forward pass
     output_tensor, gate = model_no_adarms(input_tensor, adarms_cond=None)
     print(f"Output shape: {output_tensor.shape}")
-    print(f"Gate: {gate}")
+    print(f"Gate shape: {gate.shape}")
+    print(f"Gate values (first 5): {gate[:5]}")
     assert output_tensor.shape == input_tensor.shape, "Output shape mismatch!"
-    assert gate is None, "Gate should be None when not using AdaRMS!"
+    assert gate is not None, "Gate should always be returned (learnable gating_alpha)!"
+    assert gate.shape == (hidden_size,), f"Gate shape should be ({hidden_size},), got {gate.shape}"
     print("✓ Test 1 passed!")
 
     # Test 2: With AdaRMS (adaptive gating enabled)
@@ -366,11 +393,11 @@ if __name__ == "__main__":
     output_tensor, gate = model_with_adarms(input_tensor, adarms_cond=adarms_cond)
     print(f"Output shape: {output_tensor.shape}")
     print(f"Gate shape: {gate.shape}")
-    print(f"Gate mean per sample: {gate.mean(dim=-1)[:4, 0].tolist()}")
+    print(f"Gate values (first 5): {gate[:5]}")
     assert output_tensor.shape == input_tensor.shape, "Output shape mismatch!"
     assert gate is not None, "Gate should not be None when using AdaRMS!"
-    # Gate shape is [B, 1, hidden_size] for broadcasting with [B, L, hidden_size]
-    assert gate.shape == (batch_size, 1, hidden_size), f"Gate shape should be ({batch_size}, 1, {hidden_size}), got {gate.shape}"
+    # Gate shape is [hidden_size] for broadcasting with [B, L, hidden_size]
+    assert gate.shape == (hidden_size,), f"Gate shape should be ({hidden_size},), got {gate.shape}"
     print("✓ Test 2 passed!")
 
     # Test 3: Backward pass (gradient flow)

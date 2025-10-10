@@ -37,6 +37,7 @@ class Pi0Config(_model.BaseModelConfig):
     ttt_layer_type: str = "linear"  # Type of TTT layer: "linear" (closed-form solution)
     ttt_layer_positions: list = None  # type: ignore  # List of layer indices where TTT should be applied
     use_dual_form: bool = True  # Whether to use dual form for TTT (closed-form solution, more memory efficient)
+    ttt_base_lr: float = 1.0  # Base learning rate for TTT layer (scaled by 1/head_dim internally)
 
     def __post_init__(self):
         if self.max_token_len is None:

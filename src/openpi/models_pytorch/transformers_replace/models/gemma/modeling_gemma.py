@@ -359,7 +359,7 @@ class GemmaDecoderLayer(GradientCheckpointingLayer):
                 ttt_module_path = os.path.join(os.path.dirname(__file__), '../../../')
                 if ttt_module_path not in sys.path:
                     sys.path.insert(0, ttt_module_path)
-                from ttt_with_gate import TTTWithAdaptiveNorm
+                from .ttt_with_gate import TTTWithAdaptiveNorm
 
                 # Create TTT layer with integrated adaptive normalization
                 self.ttt_layer = TTTWithAdaptiveNorm(
@@ -371,6 +371,7 @@ class GemmaDecoderLayer(GradientCheckpointingLayer):
                     adarms_cond_dim=cond_dim,
                     eps=config.rms_norm_eps,
                     use_dual_form=getattr(config, 'use_dual_form', True),
+                    ttt_base_lr=getattr(config, 'ttt_base_lr', 1.0),
                 )
             else:
                 self.ttt_layer = None
