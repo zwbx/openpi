@@ -845,6 +845,8 @@ _CONFIGS = [
             use_ttt=True,
             ttt_layer_type="linear",  # Linear TTT with closed-form solution (dual form)
             ttt_layer_positions="all",  # Apply TTT to all layers; can also use list like [14, 15, 16, 17] for specific layers
+            use_dual_form=True,
+            ttt_base_lr=5e-5
         ),
         data=LeRobotSimplerDataConfig(
             repo_id="lerobot-pi0-bridge",
@@ -863,7 +865,8 @@ _CONFIGS = [
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         ema_decay=0.999,
-        pytorch_weight_path="/dev/shm/pi05_base_pytorch",
+        # pytorch_weight_path="/dev/shm/pi05_base_pytorch",
+        pytorch_weight_path="/mnt/hdfs/wenbo/vla/pi05_simpler_ckpt/95000/",
         num_train_steps=100_000,
         num_workers=32,
     ),
