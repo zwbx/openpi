@@ -9,11 +9,64 @@ Based on the original TTTLinear implementation from ttt.py, but adapted to:
 2. Return both output and gate for dual-gate residual design
 3. Support conditional gating based on diffusion timestep
 4. Batch-parallel optimization (no sequential scan, no position IDs)
+5. Stateful inference: optionally keep W/b state across forward calls
+6. Loss tracking: record inner-loop reconstruction loss during inference
 """
 
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List, Dict
 import torch
 from torch import nn
+
+
+# ==== Global TTT Loss Tracker ====
+class TTTLossTracker:
+    """Global singleton to collect TTT losses from all layers."""
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance.reset()
+        return cls._instance
+
+    def reset(self):
+        """Reset all collected losses."""
+        self.losses = {}  # {step: {layer_idx: loss}}
+        self.current_step = 0
+
+    def record_loss(self, layer_idx: int, loss: float):
+        """Record loss for a specific layer at current step."""
+        if self.current_step not in self.losses:
+            self.losses[self.current_step] = {}
+        self.losses[self.current_step][layer_idx] = loss
+
+    def next_step(self):
+        """Move to next inference step and print summary."""
+        if self.current_step in self.losses:
+            self.print_summary(self.current_step)
+        self.current_step += 1
+
+    def print_summary(self, step: int):
+        """Print loss summary for all layers at given step."""
+        if step not in self.losses:
+            return
+
+        layer_losses = self.losses[step]
+        if not layer_losses:
+            return
+
+        # Sort by layer index
+        sorted_layers = sorted(layer_losses.items())
+
+        # Format output
+        loss_str = ", ".join([f"L{idx}: {loss:.6f}" for idx, loss in sorted_layers])
+        avg_loss = sum(layer_losses.values()) / len(layer_losses)
+
+        print(f"[TTT Step {step}] {loss_str} | Avg: {avg_loss:.6f}")
+
+    def get_losses(self) -> Dict[int, Dict[int, float]]:
+        """Get all recorded losses."""
+        return self.losses
 
 
 def ln_fwd(x, gamma, beta, eps=1e-6):
@@ -132,9 +185,12 @@ class TTTWithAdaptiveNorm(nn.Module):
         use_adarms: bool = False,
         adarms_cond_dim: Optional[int] = None,
         eps: float = 1e-6,
-        use_dual_form: bool = True,  # Whether to use dual form (more memory efficient)
+        use_dual_form: bool = True,  # Whether to use dual form (only when keep_state=False)
         gating_alpha_init: float = 0.1,  # Initial value for learnable gate
         ttt_base_lr: float = 1.0,  # Base learning rate for TTT (1.0 for linear, 0.1 for MLP)
+        keep_state: bool = False,  # NEW: If True, W/b persist across forward calls
+        track_loss: bool = True,   # NEW: If True, record inner-loop reconstruction loss
+        layer_idx: int = -1,  # NEW: Layer index for logging (set by modeling_gemma.py)
     ):
         super().__init__()
         self.num_heads = num_heads
@@ -145,6 +201,9 @@ class TTTWithAdaptiveNorm(nn.Module):
         self.eps = eps
         self.use_dual_form = use_dual_form
         self.ttt_base_lr = ttt_base_lr
+        self.keep_state = keep_state
+        self.track_loss = track_loss
+        self.layer_idx = layer_idx  # NEW: Store layer index
 
         # Initialize Q/K/V/O projections
         self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
@@ -184,6 +243,9 @@ class TTTWithAdaptiveNorm(nn.Module):
         else:
             self.adarms_gate_dense = None
 
+        # ==== NEW: Loss tracking ====
+        self.loss_history: List[Dict[str, float]] = []
+        self.loss_tracker = TTTLossTracker() if track_loss else None
 
     def get_qkv_projections(self, hidden_states):
         """Get Q, K, V projections."""
@@ -235,12 +297,24 @@ class TTTWithAdaptiveNorm(nn.Module):
         Z1 = torch.einsum("bhld,bhdf->bhlf", X1, W1_init) + b1_init  # [B, num_heads, L, head_dim]
         reconstruction_target = XV - XK  # Residual design
 
+        # ==== Track loss ====
+        if self.track_loss and self.loss_tracker is not None:
+            recon_loss = torch.norm(Z1 - reconstruction_target).item()
+            # Record to global tracker (will be printed by next_step())
+            self.loss_tracker.record_loss(self.layer_idx, recon_loss)
+            # Also store in local history
+            self.loss_history.append({
+                "layer_idx": self.layer_idx,
+                "step": len(self.loss_history),
+                "loss": recon_loss,
+            })
+
         # Compute gradient
         ln_weight = self.ttt_norm_weight.reshape(1, num_heads, 1, head_dim)
         ln_bias = self.ttt_norm_bias.reshape(1, num_heads, 1, head_dim)
         grad_l_wrt_Z1 = ln_fused_l2_bwd(Z1, reconstruction_target, ln_weight, ln_bias)
 
-        if self.use_dual_form:
+        if self.use_dual_form and not self.keep_state:
             # Dual form: more memory efficient, avoids storing grad_W1
             # Compute attention matrix: [B, num_heads, L, L]
             # No causal masking - allow full token interactions for denoising
@@ -264,6 +338,11 @@ class TTTWithAdaptiveNorm(nn.Module):
             # Update W and b
             W1_updated = W1_init - eta * grad_W1
             b1_updated = b1_init - eta * grad_b1
+
+            # ==== Save state if keep_state=True ====
+            if self.keep_state:
+                self.W1.data = W1_updated.clone().detach()
+                self.b1.data = b1_updated.clone().detach()
 
             # Forward with updated parameters
             Z1_bar = torch.einsum("bhld,bhdf->bhlf", XQ, W1_updated) + b1_updated
