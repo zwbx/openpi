@@ -372,6 +372,9 @@ class GemmaDecoderLayer(GradientCheckpointingLayer):
                     eps=config.rms_norm_eps,
                     use_dual_form=getattr(config, 'use_dual_form', True),
                     ttt_base_lr=getattr(config, 'ttt_base_lr', 1.0),
+                    keep_state=getattr(config, 'ttt_keep_state', False),
+                    track_loss=getattr(config, 'ttt_track_loss', True),
+                    layer_idx=layer_idx,  # Pass layer index for logging
                 )
             else:
                 self.ttt_layer = None
