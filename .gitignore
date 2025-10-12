@@ -1,4 +1,5 @@
 SimplerEnv/results/*mp4*
+SimplerEnv/results/**png
 lerobot-pi0-bridge.tar
 lerobot-pi0-bridge/
 ckpt/
