@@ -84,11 +84,11 @@ echo "Wrote /etc/vulkan/implicit_layer.d/nvidia_layers.json"
 uv pip install sapien
 uv run python -m sapien.example.offscreen
 
-# copy pi05_base_pytorch to /dev/shm/
-cp -r /mnt/hdfs/wenbo/vla/pi05/pi05_base_pytorch /dev/shm/
+# # copy pi05_base_pytorch to /dev/shm/
+# cp -r /mnt/hdfs/wenbo/vla/pi05/pi05_base_pytorch /dev/shm/
 
-# copy dataset to /opt/tiger/openpi/
-cp -r /mnt/hdfs/wenbo/vla/lerobot-pi0-bridge.tar /opt/tiger/openpi/
+# # copy dataset to /opt/tiger/openpi/
+# cp -r /mnt/hdfs/wenbo/vla/lerobot-pi0-bridge.tar /opt/tiger/openpi/
 
-# untar dataset
-tar -xvf /opt/tiger/openpi/lerobot-pi0-bridge.tar -C /dev/shm/
+# # untar dataset
+# tar -xvf /opt/tiger/openpi/lerobot-pi0-bridge.tar -C /dev/shm/

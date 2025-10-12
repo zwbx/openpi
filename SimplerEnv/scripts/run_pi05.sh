@@ -1,6 +1,7 @@
 XDG_RUNTIME_DIR=/usr/lib
 LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}"
 
+source /opt/tiger/openpi/.venv/bin/activate
 model_name=pi05
 
 tasks=(
@@ -16,7 +17,7 @@ tasks=(
 )
 
 ckpts=(
-/mnt/hdfs/wenbo/vla/pi05_simpler_ckpt/95000
+/mnt/hdfs/wenbo/vla/pi05_simpler_ckpt/pi05_simpler_zscore_32card/80000/
 )
 
 
