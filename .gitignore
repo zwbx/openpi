@@ -1,5 +1,5 @@
-SimplerEnv/results/*mp4*
-SimplerEnv/results/**png
+SimplerEnv/results/**/*.mp4
+SimplerEnv/results/**/*.png
 ttt-video-dit
 lerobot-pi0-bridge.tar
 lerobot-pi0-bridge/
