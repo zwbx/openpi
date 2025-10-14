@@ -43,12 +43,26 @@
 
 ---
 
+### 5. [Self-Alignment Implementation Plan](./self_alignment_implementation_plan.md)
+**自对齐VLA完整实现计划**
+
+- 核心思想：解耦 embodiment-agnostic 和 embodiment-relevant 表征
+- Alignment Experts 架构设计（Inverse Dynamics, Dynamics, Perception）
+- 对比学习策略（正样本/负样本构造）
+- 自对齐训练流程（两阶段训练）
+- 详细的实现路径和时间线（7个Phase）
+
+**关键创新**：使用 TTT 层参数作为 embodiment context W，通过 play data 实现零样本迁移
+
+---
+
 ## 文档创建时间
 
 - `gradient_checkpointing_analysis.md`: 2025-10-14
 - `attention_mask_analysis.md`: 2025-10-14
 - `TTT_Action_Expert_Integration_Plan.md`: 2025-10-12
 - `ttt_video_dit_comparison.md`: 2025-10-12
+- `self_alignment_implementation_plan.md`: 2025-10-14
 
 ## 贡献
 
