@@ -163,6 +163,10 @@ class TTTWithAdaptiveNorm(nn.Module):
     This class combines TTTLinear functionality with a learnable per-dimension gate
     similar to ttt-video-dit's SSMGating.
 
+    Implements singleton pattern per layer_idx: instances with the same layer_idx
+    will share the same TTT parameters (W1, b1), enabling parameter sharing across
+    different experts (e.g., Action Expert and Alignment Expert).
+
     Args:
         num_heads: Number of attention heads
         hidden_size: Hidden dimension size
@@ -174,7 +178,33 @@ class TTTWithAdaptiveNorm(nn.Module):
         use_dual_form: Whether to use dual form (more memory efficient)
         gating_alpha_init: Initial value for learnable gating alpha (default 0.1)
         ttt_base_lr: Base learning rate for TTT (default 1.0 for linear, 0.1 for MLP)
+        keep_state: If True, W/b persist across forward calls
+        track_loss: If True, record inner-loop reconstruction loss
+        layer_idx: Layer index for singleton pattern and logging
     """
+
+    # Class variable to store instances by layer_idx
+    _instances = {}  # {layer_idx: instance}
+
+    def __new__(cls, *args, layer_idx: int = -1, **kwargs):
+        """
+        Singleton pattern: return existing instance if layer_idx already exists.
+
+        This ensures that Action Expert and Alignment Expert share the same
+        TTT parameters (W1, b1) for the same layer.
+        """
+        if layer_idx >= 0 and layer_idx in cls._instances:
+            # Reuse existing instance for this layer
+            existing_instance = cls._instances[layer_idx]
+            print(f"[TTT Singleton] Layer {layer_idx}: Reusing existing instance (parameters shared)")
+            return existing_instance
+        else:
+            # Create new instance
+            instance = super(TTTWithAdaptiveNorm, cls).__new__(cls)
+            if layer_idx >= 0:
+                cls._instances[layer_idx] = instance
+                print(f"[TTT Singleton] Layer {layer_idx}: Creating new instance")
+            return instance
 
     def __init__(
         self,
@@ -190,8 +220,12 @@ class TTTWithAdaptiveNorm(nn.Module):
         ttt_base_lr: float = 1.0,  # Base learning rate for TTT (1.0 for linear, 0.1 for MLP)
         keep_state: bool = False,  # NEW: If True, W/b persist across forward calls
         track_loss: bool = True,   # NEW: If True, record inner-loop reconstruction loss
-        layer_idx: int = -1,  # NEW: Layer index for logging (set by modeling_gemma.py)
+        layer_idx: int = -1,  # NEW: Layer index for singleton pattern and logging
     ):
+        # Skip initialization if this instance was already initialized (singleton reuse)
+        if hasattr(self, '_initialized') and self._initialized:
+            return
+
         super().__init__()
         self.num_heads = num_heads
         self.hidden_size = hidden_size
