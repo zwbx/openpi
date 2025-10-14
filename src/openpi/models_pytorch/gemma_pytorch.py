@@ -14,14 +14,16 @@ class PaliGemmaWithExpertModel(nn.Module):
         self,
         vlm_config,
         action_expert_config,
+        alignment_expert_config=None,
         use_adarms=None,
+        use_alignment_expert: bool = False,
         precision: Literal["bfloat16", "float32"] = "bfloat16",
         use_ttt: bool = False,
         ttt_layer_positions: list = None,
         use_dual_form: bool = True,
     ):
         if use_adarms is None:
-            use_adarms = [False, False]
+            use_adarms = [False, False, False]  # [VLM, Action Expert, Alignment Expert]
         super().__init__()
 
         vlm_config_hf = CONFIG_MAPPING["paligemma"]()
@@ -66,6 +68,34 @@ class PaliGemmaWithExpertModel(nn.Module):
         self.paligemma = PaliGemmaForConditionalGeneration(config=vlm_config_hf)
         self.gemma_expert = GemmaForCausalLM(config=action_expert_config_hf)
         self.gemma_expert.model.embed_tokens = None
+
+        # Alignment Expert (optional, lightweight model for self-alignment training)
+        # KEY: Alignment expert also uses TTT, and shares TTT parameters with Action Expert!
+        if use_alignment_expert and alignment_expert_config is not None:
+            alignment_expert_config_hf = CONFIG_MAPPING["gemma"](
+                head_dim=alignment_expert_config.head_dim,
+                hidden_size=alignment_expert_config.width,
+                intermediate_size=alignment_expert_config.mlp_dim,
+                num_attention_heads=alignment_expert_config.num_heads,
+                num_hidden_layers=alignment_expert_config.depth,  # 通常设置为2-4层，比Action Expert轻量
+                num_key_value_heads=alignment_expert_config.num_kv_heads,
+                vocab_size=257152,
+                hidden_activation="gelu_pytorch_tanh",
+                torch_dtype="float32",
+                use_adarms=use_adarms[2] if len(use_adarms) > 2 else False,
+                adarms_cond_dim=alignment_expert_config.width if (len(use_adarms) > 2 and use_adarms[2]) else None,
+                # Alignment expert ALSO uses TTT (shares W with Action Expert)
+                use_ttt=use_ttt,
+                ttt_layer_positions=ttt_layer_positions,
+                use_dual_form=use_dual_form,
+            )
+            self.alignment_expert = GemmaForCausalLM(config=alignment_expert_config_hf)
+            self.alignment_expert.model.embed_tokens = None
+
+            # Share TTT parameters between Action Expert and Alignment Expert
+            self._share_ttt_parameters()
+        else:
+            self.alignment_expert = None
 
         self.to_bfloat16_for_selected_params(precision)
 
@@ -226,21 +256,20 @@ class PaliGemmaWithExpertModel(nn.Module):
                     layer = models[i].layers[layer_idx]
                     end_pos = start_pos + hidden_states.shape[1]
 
+                    # Step 1: O Projection (only call once)
+                    attn_out_slice = att_output[:, start_pos:end_pos]
                     if att_output.dtype != layer.self_attn.o_proj.weight.dtype:
-                        att_output = att_output.to(layer.self_attn.o_proj.weight.dtype)
-                    out_emb = layer.self_attn.o_proj(att_output[:, start_pos:end_pos])
+                        attn_out_slice = attn_out_slice.to(layer.self_attn.o_proj.weight.dtype)
+                    out_emb = layer.self_attn.o_proj(attn_out_slice)
 
-                    # first residual
+                    # Step 2: First Residual (attention branch)
                     out_emb = modeling_gemma._gated_residual(hidden_states, out_emb, gates[i])  # noqa: SLF001
                     after_first_residual = out_emb.clone()
 
-                    # TTT layer (if enabled) - should be called after attention, before MLP
+                    # Step 3: TTT Layer (if enabled) - after first residual
                     if hasattr(layer, 'ttt_layer') and layer.ttt_layer is not None:
-                        # Get the attention output for TTT (before first residual)
-                        attn_out_for_ttt = layer.self_attn.o_proj(att_output[:, start_pos:end_pos])
-
-                        # TTT forward with integrated normalization
-                        ttt_output, gate_ttt = layer.ttt_layer(attn_out_for_ttt, adarms_cond[i], cache_params=None)
+                        # TTT uses the output after o_proj and first residual
+                        ttt_output, gate_ttt = layer.ttt_layer(out_emb, adarms_cond[i], cache_params=None)
 
                         # Add TTT branch (gated residual)
                         if gate_ttt is not None:
@@ -249,6 +278,10 @@ class PaliGemmaWithExpertModel(nn.Module):
                             # If no gate (not using adarms), just add the output
                             out_emb = out_emb + ttt_output
 
+                        # Update after_first_residual to include TTT contribution
+                        after_first_residual = out_emb.clone()
+
+                    # Step 4: MLP Block
                     out_emb, gate = layer.post_attention_layernorm(out_emb, cond=adarms_cond[i])
                     # Convert to bfloat16 if the next layer (mlp) uses bfloat16
                     if layer.mlp.up_proj.weight.dtype == torch.bfloat16:
