@@ -20,6 +20,7 @@ class Pi0Config(_model.BaseModelConfig):
     dtype: str = "bfloat16"
     paligemma_variant: _gemma.Variant = "gemma_2b"
     action_expert_variant: _gemma.Variant = "gemma_300m"
+    alignment_expert_variant: _gemma.Variant = "gemma_300m"  # Lightweight model for alignment experts
 
     # Set the model specific defaults.
     action_dim: int = 32
@@ -39,6 +40,10 @@ class Pi0Config(_model.BaseModelConfig):
     use_dual_form: bool = True  # Whether to use dual form for TTT (closed-form solution, more memory efficient)
     ttt_base_lr: float = 5e-5  # Base learning rate for TTT layer (scaled by 1/head_dim internally)
 
+    # alignment expert configuration
+    use_alignment_expert: bool = False
+
+    
     def __post_init__(self):
         if self.max_token_len is None:
             object.__setattr__(self, "max_token_len", 200 if self.pi05 else 48)
