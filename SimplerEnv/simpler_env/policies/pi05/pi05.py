@@ -13,7 +13,6 @@ import numpy as np
 import torch
 from openpi_client import websocket_client_policy as _websocket_client_policy
 
-
 class Pi05Inference:
     def __init__(
         self,
@@ -168,10 +167,11 @@ class Pi05Inference:
         #     raw_actions = self.action_ensembler.ensemble_action(raw_actions)[None]
 
         if not self.action_plan:
+
             observation = {
                 "state": state,
                 "image": np.array(images[0]),
-                "prompt": task_description, 
+                "prompt": task_description,
             }
             action_chunk = self.policy_client.infer(observation)["actions"][:self.pred_action_horizon]
             self.action_plan.extend(action_chunk[: self.exec_horizon])

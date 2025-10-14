@@ -17,7 +17,8 @@ tasks=(
 )
 
 ckpts=(
-/mnt/hdfs/wenbo/vla/pi05_simpler_ckpt/pi05_simpler_zscore_32card/80000/
+# /mnt/hdfs/wenbo/vla/pi05_simpler_ckpt/pi05_simpler_zscore_32card/80000/
+ttt_true
 )
 
 

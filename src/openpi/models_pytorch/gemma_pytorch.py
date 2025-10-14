@@ -38,6 +38,9 @@ class PaliGemmaWithExpertModel(nn.Module):
         vlm_config_hf.text_config.vocab_size = 257152
         vlm_config_hf.text_config.use_adarms = use_adarms[0]
         vlm_config_hf.text_config.adarms_cond_dim = vlm_config.width if use_adarms[0] else None
+        # Explicitly disable TTT for VLM (only Action Expert should use TTT)
+        vlm_config_hf.text_config.use_ttt = False
+        vlm_config_hf.text_config.ttt_layer_positions = None
         vlm_config_hf.vision_config.intermediate_size = 4304
         vlm_config_hf.vision_config.projection_dim = 2048
         vlm_config_hf.vision_config.projector_hidden_act = "gelu_fast"
@@ -230,6 +233,22 @@ class PaliGemmaWithExpertModel(nn.Module):
                     # first residual
                     out_emb = modeling_gemma._gated_residual(hidden_states, out_emb, gates[i])  # noqa: SLF001
                     after_first_residual = out_emb.clone()
+
+                    # TTT layer (if enabled) - should be called after attention, before MLP
+                    if hasattr(layer, 'ttt_layer') and layer.ttt_layer is not None:
+                        # Get the attention output for TTT (before first residual)
+                        attn_out_for_ttt = layer.self_attn.o_proj(att_output[:, start_pos:end_pos])
+
+                        # TTT forward with integrated normalization
+                        ttt_output, gate_ttt = layer.ttt_layer(attn_out_for_ttt, adarms_cond[i], cache_params=None)
+
+                        # Add TTT branch (gated residual)
+                        if gate_ttt is not None:
+                            out_emb = out_emb + gate_ttt * ttt_output
+                        else:
+                            # If no gate (not using adarms), just add the output
+                            out_emb = out_emb + ttt_output
+
                     out_emb, gate = layer.post_attention_layernorm(out_emb, cond=adarms_cond[i])
                     # Convert to bfloat16 if the next layer (mlp) uses bfloat16
                     if layer.mlp.up_proj.weight.dtype == torch.bfloat16:

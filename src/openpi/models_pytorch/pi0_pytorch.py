@@ -10,6 +10,14 @@ import openpi.models.gemma as _gemma
 from openpi.models_pytorch.gemma_pytorch import PaliGemmaWithExpertModel
 import openpi.models_pytorch.preprocessing_pytorch as _preprocessing
 
+# Import TTTLossTracker for tracking TTT layer losses during inference
+try:
+    from transformers.models.gemma.ttt_with_gate import TTTLossTracker
+    TTT_LOSS_TRACKING_AVAILABLE = True
+except ImportError:
+    TTT_LOSS_TRACKING_AVAILABLE = False
+    TTTLossTracker = None
+
 
 def get_safe_dtype(target_dtype, device_type):
     """Get a safe dtype for the given device type."""
@@ -116,6 +124,13 @@ class PI0Pytorch(nn.Module):
 
         # Initialize gradient checkpointing flag
         self.gradient_checkpointing_enabled = False
+
+        # Initialize TTT loss tracker if enabled in config
+        if TTT_LOSS_TRACKING_AVAILABLE and getattr(config, 'ttt_track_loss', True):
+            self.ttt_loss_tracker = TTTLossTracker()
+            logging.info("TTT loss tracking enabled in PI0Pytorch model")
+        else:
+            self.ttt_loss_tracker = None
 
         msg = "transformers_replace is not installed correctly. Please install it with `uv pip install transformers==4.53.2` and `cp -r ./src/openpi/models_pytorch/transformers_replace/* .venv/lib/python3.11/site-packages/transformers/`."
         try:
@@ -378,6 +393,10 @@ class PI0Pytorch(nn.Module):
     @torch.no_grad()
     def sample_actions(self, device, observation, noise=None, num_steps=10) -> Tensor:
         """Do a full inference forward and compute the action (batch_size x num_steps x num_motors)"""
+        # Reset TTT loss tracker before inference
+        if self.ttt_loss_tracker is not None:
+            self.ttt_loss_tracker.reset()
+
         bsize = observation.state.shape[0]
         if noise is None:
             actions_shape = (bsize, self.config.action_horizon, self.config.action_dim)
@@ -419,6 +438,11 @@ class PI0Pytorch(nn.Module):
             # Euler step - use new tensor assignment instead of in-place operation
             x_t = x_t + dt * v_t
             time += dt
+
+        # Print TTT loss summary after inference
+        if self.ttt_loss_tracker is not None:
+            self.ttt_loss_tracker.next_step()
+
         return x_t
 
     def denoise_step(
