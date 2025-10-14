@@ -137,8 +137,8 @@ class PaliGemmaWithExpertModel(nn.Module):
         adarms_cond: list[torch.Tensor] | None = None,
     ):
         if adarms_cond is None:
-            adarms_cond = [None, None]
-        if inputs_embeds[1] is None:
+            adarms_cond = [None, None, None]  # [VLM, Action Expert, Alignment Expert]
+        if inputs_embeds[0] is not None and inputs_embeds[1] is None: # for VLM
             prefix_output = self.paligemma.language_model.forward(
                 inputs_embeds=inputs_embeds[0],
                 attention_mask=attention_mask,
@@ -150,7 +150,7 @@ class PaliGemmaWithExpertModel(nn.Module):
             prefix_past_key_values = prefix_output.past_key_values
             prefix_output = prefix_output.last_hidden_state
             suffix_output = None
-        elif inputs_embeds[0] is None:
+        elif inputs_embeds[0] is None and inputs_embeds[1] is not None: # for action expert
             suffix_output = self.gemma_expert.model.forward(
                 inputs_embeds=inputs_embeds[1],
                 attention_mask=attention_mask,
@@ -162,8 +162,24 @@ class PaliGemmaWithExpertModel(nn.Module):
             suffix_output = suffix_output.last_hidden_state
             prefix_output = None
             prefix_past_key_values = None
-        else:
+        elif inputs_embeds[0] is not None and inputs_embeds[2] is not None: # for alignment expert
+            suffix_output = self.alignment_expert.model.forward(
+                inputs_embeds=inputs_embeds[2],
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+                adarms_cond=adarms_cond[2] if adarms_cond is not None else None,
+            )
+            suffix_output = suffix_output.last_hidden_state
+            prefix_output = None
+            prefix_past_key_values = None
+        else: # for training (joint attention for all experts)
+            # Build models list: VLM + Action Expert + (optional) Alignment Expert
             models = [self.paligemma.language_model, self.gemma_expert.model]
+            if self.alignment_expert is not None and len(inputs_embeds) > 2 and inputs_embeds[2] is not None:
+                models.append(self.alignment_expert.model)
+
             num_layers = self.paligemma.config.text_config.num_hidden_layers
 
             # Check if gradient checkpointing is enabled for any of the models
@@ -195,8 +211,7 @@ class PaliGemmaWithExpertModel(nn.Module):
 
             # Define the complete layer computation function for gradient checkpointing
             def compute_layer_complete(layer_idx, inputs_embeds, attention_mask, position_ids, adarms_cond):
-                models = [self.paligemma.language_model, self.gemma_expert.model]
-
+                # Use models from outer scope (can be 2 or 3 experts)
                 query_states = []
                 key_states = []
                 value_states = []
@@ -334,6 +349,11 @@ class PaliGemmaWithExpertModel(nn.Module):
 
             prefix_output = outputs_embeds[0]
             suffix_output = outputs_embeds[1]
+            alignment_output = outputs_embeds[2] if len(outputs_embeds) > 2 else None
             prefix_past_key_values = None
 
-        return [prefix_output, suffix_output], prefix_past_key_values
+        return_outputs = [prefix_output, suffix_output]
+        if alignment_output is not None:
+            return_outputs.append(alignment_output)
+
+        return return_outputs, prefix_past_key_values
