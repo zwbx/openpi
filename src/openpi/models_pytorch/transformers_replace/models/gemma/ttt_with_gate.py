@@ -221,6 +221,7 @@ class TTTWithAdaptiveNorm(nn.Module):
         keep_state: bool = False,  # NEW: If True, W/b persist across forward calls
         track_loss: bool = True,   # NEW: If True, record inner-loop reconstruction loss
         layer_idx: int = -1,  # NEW: Layer index for singleton pattern and logging
+        num_embodiments: int = 20,  # NEW: Number of embodiments for multi-W
     ):
         # Skip initialization if this instance was already initialized (singleton reuse)
         if hasattr(self, '_initialized') and self._initialized:
@@ -238,6 +239,7 @@ class TTTWithAdaptiveNorm(nn.Module):
         self.keep_state = keep_state
         self.track_loss = track_loss
         self.layer_idx = layer_idx  # NEW: Store layer index
+        self.num_embodiments = num_embodiments  # NEW: Store number of embodiments
 
         # Initialize Q/K/V/O projections
         self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
@@ -254,9 +256,13 @@ class TTTWithAdaptiveNorm(nn.Module):
         # Post normalization and output projection
         self.post_norm = nn.LayerNorm(self.hidden_size, eps=self.eps)
 
-        # TTT model parameters
-        self.W1 = nn.Parameter(torch.normal(0, 0.02, size=(self.num_heads, self.head_dim, self.head_dim)))
-        self.b1 = nn.Parameter(torch.zeros(self.num_heads, 1, self.head_dim))
+        # TTT model parameters - Multi-embodiment version
+        # Shape: [num_embodiments, num_heads, head_dim, head_dim]
+        self.W1 = nn.Parameter(
+            torch.normal(0, 0.02, size=(self.num_embodiments, self.num_heads, self.head_dim, self.head_dim))
+        )
+        # Shape: [num_embodiments, num_heads, 1, head_dim]
+        self.b1 = nn.Parameter(torch.zeros(self.num_embodiments, self.num_heads, 1, self.head_dim))
 
         # Learnable TTT learning rate (input-dependent)
         # [num_heads, hidden_size, 1]
