@@ -41,8 +41,11 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
                 time.sleep(5)
 
     @override
-    def infer(self, obs: Dict) -> Dict:  # noqa: UP006
+    def infer(self, obs: Dict,  use_align=False, align_type="online") -> Dict:  # noqa: UP006
         data = self._packer.pack(obs)
+        if use_align:
+            data["use_align"] = True
+            data["align_type"] = align_type
         self._ws.send(data)
         response = self._ws.recv()
         if isinstance(response, str):
