@@ -16,6 +16,29 @@ if TYPE_CHECKING:
 
 
 @dataclasses.dataclass(frozen=True)
+class AlignConfig:
+    """Configuration for online alignment adaptation.
+
+    Controls the behavior of the align() method which performs test-time adaptation
+    using collected online interaction data.
+    """
+    # Batch size for alignment training
+    batch_size: int = 32
+
+    # Minimum buffer size required before starting alignment
+    min_buffer_size: int = 20
+
+    # Learning rate for alignment optimizer
+    learning_rate: float = 1e-4
+
+    # Number of gradient steps per alignment call
+    align_steps: int = 5
+
+    # Frequency of alignment calls (every N inference steps)
+    align_frequency: int = 10
+
+
+@dataclasses.dataclass(frozen=True)
 class Pi0Config(_model.BaseModelConfig):
     dtype: str = "bfloat16"
     paligemma_variant: _gemma.Variant = "gemma_2b"
@@ -43,7 +66,10 @@ class Pi0Config(_model.BaseModelConfig):
     # alignment expert configuration
     use_alignment_expert: bool = False
 
-    
+    # Online alignment configuration (will be converted to dict for PyTorch model)
+    align_config: AlignConfig = dataclasses.field(default_factory=AlignConfig)
+
+
     def __post_init__(self):
         if self.max_token_len is None:
             object.__setattr__(self, "max_token_len", 200 if self.pi05 else 48)
