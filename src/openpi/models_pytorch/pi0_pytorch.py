@@ -9,6 +9,8 @@ import torch.nn.functional as F  # noqa: N812
 import openpi.models.gemma as _gemma
 from openpi.models_pytorch.gemma_pytorch import PaliGemmaWithExpertModel
 import openpi.models_pytorch.preprocessing_pytorch as _preprocessing
+import random
+import time
 
 # Import TTTLossTracker for tracking TTT layer losses during inference
 try:
@@ -17,6 +19,87 @@ try:
 except ImportError:
     TTT_LOSS_TRACKING_AVAILABLE = False
     TTTLossTracker = None
+
+
+class AlignBuffer:
+    """Buffer for storing online interaction data for alignment adaptation.
+
+    Stores sequences of (observation, action) tuples collected during online execution.
+    Used by align() to construct training pairs from consecutive frames.
+    """
+
+    def __init__(self, max_size=1000):
+        """Initialize the buffer.
+
+        Args:
+            max_size: Maximum number of interaction sequences to store
+        """
+        self.max_size = max_size
+        self.observations = []  # List of Observation objects
+        self.actions = []       # List[Tensor] - each [action_horizon, action_dim]
+
+    def add(self, observation, action):
+        """Add a new interaction sequence to the buffer with FIFO removal.
+
+        Args:
+            observation: Observation object containing images and state
+            action: Tensor [action_horizon, action_dim] - executed action
+        """
+        # Add new data
+        self.observations.append(observation)
+        self.actions.append(action)
+
+        # FIFO: Remove oldest if exceeds max_size
+        if len(self.observations) > self.max_size:
+            self.observations.pop(0)
+            self.actions.pop(0)
+
+    def sample(self, batch_size):
+        """Randomly sample consecutive pairs from the buffer.
+
+        Samples indices i and constructs (obs_i, action_i, obs_i+1) pairs.
+
+        Args:
+            batch_size: Number of samples to draw
+
+        Returns:
+            dict: {
+                'observations': List[Observation],  # obs_t
+                'actions': Tensor [batch_size, action_horizon, action_dim],
+                'next_observations': List[Observation],  # obs_t+1
+            }
+        """
+        buffer_size = len(self)
+
+        if buffer_size < 2:
+            raise ValueError(f"Buffer has only {buffer_size} samples, need at least 2 for consecutive pairs")
+
+        # Sample indices ensuring we can get next observation (i+1)
+        max_index = buffer_size - 2  # -2 because we need i+1 to exist
+        actual_batch_size = min(batch_size, max_index + 1)
+
+        # Random sampling without replacement
+        indices = random.sample(range(max_index + 1), actual_batch_size)
+
+        # Construct training pairs
+        observations = [self.observations[i] for i in indices]
+        actions = [self.actions[i] for i in indices]
+        next_observations = [self.observations[i+1] for i in indices]
+
+        return {
+            'observations': observations,
+            'actions': torch.stack(actions),
+            'next_observations': next_observations,
+        }
+
+    def __len__(self):
+        """Return current buffer size."""
+        return len(self.observations)
+
+    def clear(self):
+        """Clear all data from the buffer."""
+        self.observations = []
+        self.actions = []
 
 
 def get_safe_dtype(target_dtype, device_type):
@@ -109,6 +192,7 @@ class PI0Pytorch(nn.Module):
         super().__init__()
         self.config = config
         self.pi05 = config.pi05
+        self.align_kwargs = config.align_kwargs.copy()
 
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
@@ -170,12 +254,15 @@ class PI0Pytorch(nn.Module):
         # Initialize gradient checkpointing flag
         self.gradient_checkpointing_enabled = False
 
-        # Initialize TTT loss tracker if enabled in config
-        if TTT_LOSS_TRACKING_AVAILABLE and getattr(config, 'ttt_track_loss', True):
-            self.ttt_loss_tracker = TTTLossTracker()
-            logging.info("TTT loss tracking enabled in PI0Pytorch model")
-        else:
-            self.ttt_loss_tracker = None
+        # init online buffer
+        self.buffer = AlignBuffer()
+
+        # 在线适应的步数计数器
+        self.align_step_counter = 0
+
+        # 在线适应的 optimizer (只优化 TTT 参数)
+        # 将在第一次 align() 调用时初始化(需要等待 TTT 参数可用)
+        self.align_optimizer = None
 
         msg = "transformers_replace is not installed correctly. Please install it with `uv pip install transformers==4.53.2` and `cp -r ./src/openpi/models_pytorch/transformers_replace/* .venv/lib/python3.11/site-packages/transformers/`."
         try:
@@ -378,30 +465,14 @@ class PI0Pytorch(nn.Module):
 
     def embed_alignment_suffix(self, noisy_state, actions, noisy_next_obs_features,
                                next_obs_embedding, noisy_actions, timestep):
-        """Embed all alignment expert inputs into a single suffix.
+        """Embed alignment expert inputs for three self-supervised tasks.
 
-        Combines three alignment tasks in one forward pass:
+        Tasks:
         1. Perception: noisy_state -> state
-        2. Dynamics: action + noisy_next_obs_features -> next_obs_features
-        3. Inverse Dynamics: next_obs_embedding + noisy_action -> action
+        2. Dynamics: actions + noisy_next_obs -> next_obs
+        3. Inverse Dynamics: next_obs + noisy_actions -> actions
 
-        All three tasks attend to the VLM prefix (image + language tokens).
-        Dynamics and Inverse Dynamics can attend to Perception but NOT to each other.
-
-        Args:
-            noisy_state: Noisy state for perception task [batch_size, state_dim]
-            actions: Current actions for dynamics task [batch_size, action_horizon, action_dim]
-            noisy_next_obs_features: Noisy next obs features [batch_size, feature_dim]
-            next_obs_embedding: Next observation embedding [batch_size, obs_feature_dim]
-            noisy_actions: Noisy actions for inverse dynamics [batch_size, action_horizon, action_dim]
-            timestep: Diffusion timestep [batch_size]
-
-        Returns:
-            embs: Concatenated embeddings [batch_size, total_tokens, hidden_dim]
-            pad_masks: Padding masks [batch_size, total_tokens]
-            att_masks: Attention masks [batch_size, total_tokens]
-            adarms_cond: AdaRMS conditioning from timestep
-            block_diagonal_ranges: Ranges for Dynamics and Inverse Dynamics blocks
+        Dynamics and Inverse Dynamics use block diagonal masks (cannot attend to each other).
         """
         embs = []
         pad_masks = []
@@ -409,14 +480,14 @@ class PI0Pytorch(nn.Module):
 
         bsize = noisy_state.shape[0]
         device = noisy_state.device
+        action_horizon = self.config.action_horizon
 
-        # Process timestep with adaRMS (same as Action Expert)
+        # Process timestep for adaRMS
         time_emb = create_sinusoidal_pos_embedding(
             timestep, self.action_in_proj.out_features, min_period=4e-3, max_period=4.0, device=device
         )
         time_emb = time_emb.type(dtype=timestep.dtype)
 
-        # Apply time MLP for adaRMS conditioning
         def time_mlp_func(time_emb):
             x = self.time_mlp_in(time_emb)
             x = F.silu(x)
@@ -429,128 +500,55 @@ class PI0Pytorch(nn.Module):
         if self.state_proj.weight.dtype == torch.float32:
             noisy_state = noisy_state.to(torch.float32)
 
-        def state_proj_func(noisy_state):
-            return self.state_proj(noisy_state)
+        state_emb = self._apply_checkpoint(self.state_proj, noisy_state)
+        embs.append(state_emb[:, None, :])
+        pad_masks.append(torch.ones(bsize, 1, dtype=torch.bool, device=device))
+        att_masks += [1]  # Perception starts new block
 
-        state_emb = self._apply_checkpoint(state_proj_func, noisy_state)
-        embs.append(state_emb[:, None, :])  # [batch_size, 1, hidden_dim]
-
-        state_mask = torch.ones(bsize, 1, dtype=torch.bool, device=device)
-        pad_masks.append(state_mask)
-
-        # Perception starts a new attention block (cannot see future tasks)
-        att_masks += [1]
-
-        # Track token positions for block diagonal masking
-        perception_start = 0
         perception_end = 1
 
-        # Task 2: Dynamics - embed actions and noisy_next_obs_features
-        # TODO: VERIFY ATTENTION MASK DESIGN!
-        # Current design: actions are clean (not noisy), and serve as input to predict next_obs
-        # Question: Is it OK that Dynamics task can see ground truth actions?
-
-        # Embed actions (current actions for dynamics prediction)
-        def action_proj_func(actions):
-            return self.action_in_proj(actions)
-
-        action_emb = self._apply_checkpoint(action_proj_func, actions)
-        embs.append(action_emb)  # [batch_size, action_horizon, hidden_dim]
-
-        action_horizon = action_emb.shape[1]
-        action_mask = torch.ones(bsize, action_horizon, dtype=torch.bool, device=device)
-        pad_masks.append(action_mask)
-
-        # TODO: VERIFY THIS ATTENTION MASK!
-        # First action token starts new block, rest are causal within block
-        # This means: action_t can attend to action_{0:t} and perception
+        # Task 2: Dynamics - embed actions + noisy_next_obs
+        action_emb = self._apply_checkpoint(self.action_in_proj, actions)
+        embs.append(action_emb)
+        pad_masks.append(torch.ones(bsize, action_horizon, dtype=torch.bool, device=device))
         att_masks += [1] + ([0] * (action_horizon - 1))
 
-        # Embed noisy_next_obs_features
-        # noisy_next_obs_features shape: [batch_size, feature_dim] or [batch_size, seq_len, feature_dim]
         if noisy_next_obs_features.ndim == 2:
-            # Single feature vector, add sequence dimension
-            noisy_next_obs_features = noisy_next_obs_features.unsqueeze(1)  # [batch_size, 1, feature_dim]
+            noisy_next_obs_features = noisy_next_obs_features.unsqueeze(1)
 
-        # Project to hidden dimension
-        # TODO: Should have a dedicated projection layer for next_obs_features
-        # For now, use state_proj (assuming feature_dim matches state_dim)
-        def next_obs_proj_func(noisy_next_obs_features):
-            # Apply projection to each token in the sequence
-            batch_size, seq_len, feat_dim = noisy_next_obs_features.shape
-            flat_features = noisy_next_obs_features.reshape(-1, feat_dim)
-            proj_features = self.state_proj(flat_features)
-            return proj_features.reshape(batch_size, seq_len, -1)
+        def proj_features(features):
+            batch_size, seq_len, feat_dim = features.shape
+            return self.state_proj(features.reshape(-1, feat_dim)).reshape(batch_size, seq_len, -1)
 
-        next_obs_emb = self._apply_checkpoint(next_obs_proj_func, noisy_next_obs_features)
-        embs.append(next_obs_emb)  # [batch_size, seq_len, hidden_dim]
-
+        next_obs_emb = self._apply_checkpoint(proj_features, noisy_next_obs_features)
+        embs.append(next_obs_emb)
         next_obs_seq_len = next_obs_emb.shape[1]
-        next_obs_mask = torch.ones(bsize, next_obs_seq_len, dtype=torch.bool, device=device)
-        pad_masks.append(next_obs_mask)
+        pad_masks.append(torch.ones(bsize, next_obs_seq_len, dtype=torch.bool, device=device))
+        att_masks += [0] * next_obs_seq_len
 
-        # TODO: VERIFY THIS ATTENTION MASK!
-        # First token continues the dynamics block, rest are causal within the sequence
-        # This means: next_obs_i can attend to [perception, all_actions, next_obs_{0:i}]
-        # Question: Should next_obs tokens be able to see all action tokens?
-        att_masks += [0] + ([0] * (next_obs_seq_len - 1))
+        dynamics_end = perception_end + action_horizon + next_obs_seq_len
 
-        # Track dynamics block range
-        dynamics_start = perception_end
-        dynamics_end = dynamics_start + action_horizon + next_obs_seq_len
-
-        # Task 3: Inverse Dynamics - embed next_obs_embedding and noisy_action
-        # Embed next_obs_embedding
-        # next_obs_embedding shape: [batch_size, feature_dim] or [batch_size, seq_len, feature_dim]
+        # Task 3: Inverse Dynamics - embed next_obs + noisy_actions
         if next_obs_embedding.ndim == 2:
-            # Single feature vector, add sequence dimension
-            next_obs_embedding = next_obs_embedding.unsqueeze(1)  # [batch_size, 1, feature_dim]
+            next_obs_embedding = next_obs_embedding.unsqueeze(1)
 
-        # Project to hidden dimension
-        def next_obs_emb_proj_func(next_obs_embedding):
-            # Apply projection to each token in the sequence
-            batch_size, seq_len, feat_dim = next_obs_embedding.shape
-            flat_features = next_obs_embedding.reshape(-1, feat_dim)
-            proj_features = self.state_proj(flat_features)
-            return proj_features.reshape(batch_size, seq_len, -1)
+        next_obs_emb_inv = self._apply_checkpoint(proj_features, next_obs_embedding)
+        embs.append(next_obs_emb_inv)
+        next_obs_inv_len = next_obs_emb_inv.shape[1]
+        pad_masks.append(torch.ones(bsize, next_obs_inv_len, dtype=torch.bool, device=device))
+        att_masks += [1] + ([0] * (next_obs_inv_len - 1))
 
-        next_obs_emb_for_inv = self._apply_checkpoint(next_obs_emb_proj_func, next_obs_embedding)
-        embs.append(next_obs_emb_for_inv)  # [batch_size, seq_len, hidden_dim]
-
-        next_obs_emb_seq_len = next_obs_emb_for_inv.shape[1]
-        next_obs_emb_mask = torch.ones(bsize, next_obs_emb_seq_len, dtype=torch.bool, device=device)
-        pad_masks.append(next_obs_emb_mask)
-
-        # TODO: VERIFY THIS ATTENTION MASK!
-        # Inverse dynamics starts a new block (cannot see Dynamics due to block diagonal)
-        # First token starts new block, rest are causal within sequence
-        # This means: next_obs_emb_i can attend to [perception, next_obs_emb_{0:i}]
-        att_masks += [1] + ([0] * (next_obs_emb_seq_len - 1))
-
-        # Embed noisy_action
-        def noisy_action_proj_func(noisy_actions):
-            return self.action_in_proj(noisy_actions)
-
-        noisy_action_emb = self._apply_checkpoint(noisy_action_proj_func, noisy_actions)
-        embs.append(noisy_action_emb)  # [batch_size, action_horizon, hidden_dim]
-
-        noisy_action_mask = torch.ones(bsize, action_horizon, dtype=torch.bool, device=device)
-        pad_masks.append(noisy_action_mask)
-
-        # TODO: VERIFY THIS ATTENTION MASK!
-        # Causal attention within inverse dynamics block
-        # This means: noisy_action_t can attend to [perception, all_next_obs_emb, noisy_action_{0:t}]
-        # Question: Should noisy_action tokens be able to see all next_obs_emb tokens?
+        noisy_action_emb = self._apply_checkpoint(self.action_in_proj, noisy_actions)
+        embs.append(noisy_action_emb)
+        pad_masks.append(torch.ones(bsize, action_horizon, dtype=torch.bool, device=device))
         att_masks += [0] * action_horizon
 
-        # Track inverse dynamics block range
+        # Block diagonal: Dynamics and Inverse Dynamics cannot see each other
         inverse_dynamics_start = dynamics_end
-        inverse_dynamics_end = inverse_dynamics_start + next_obs_emb_seq_len + action_horizon
+        inverse_dynamics_end = inverse_dynamics_start + next_obs_inv_len + action_horizon
+        block_diagonal_ranges = [(perception_end, dynamics_end), (inverse_dynamics_start, inverse_dynamics_end)]
 
-        # Define block diagonal ranges: Dynamics and Inverse Dynamics cannot attend to each other
-        block_diagonal_ranges = [(dynamics_start, dynamics_end), (inverse_dynamics_start, inverse_dynamics_end)]
-
-        # Concatenate all embeddings
+        # Concatenate
         embs = torch.cat(embs, dim=1)
         pad_masks = torch.cat(pad_masks, dim=1)
         att_masks = torch.tensor(att_masks, dtype=embs.dtype, device=embs.device)
@@ -558,7 +556,7 @@ class PI0Pytorch(nn.Module):
 
         return embs, pad_masks, att_masks, adarms_cond, block_diagonal_ranges
 
-    def forward(self, observation, actions, noise=None, time=None, next_obs_features=None) -> Tensor:
+    def forward(self, observation, actions, noise=None, time=None, next_obs=None) -> Tensor:
         """Do a full training forward pass and compute the loss (batch_size x num_steps x num_motors)
 
         Args:
@@ -590,7 +588,7 @@ class PI0Pytorch(nn.Module):
         use_alignment_expert = getattr(self.config, 'use_alignment_expert', False) and self.training
 
         # Alignment Expert: prepare diffusion inputs for three tasks
-        if use_alignment_expert and next_obs_features is not None:
+        if use_alignment_expert and next_obs is not None:
             time_expanded_state = time[:, None]  # [batch_size, 1]
 
             # Task 1: Perception (noisy_state -> state)
@@ -599,9 +597,9 @@ class PI0Pytorch(nn.Module):
             u_t_perception = noise_perception - state
 
             # Task 2: Dynamics (action + noisy_next_obs -> next_obs)
-            noise_dynamics = self.sample_noise(next_obs_features.shape, next_obs_features.device)
-            next_obs_t = time_expanded_state * noise_dynamics + (1 - time_expanded_state) * next_obs_features
-            u_t_dynamics = noise_dynamics - next_obs_features
+            noise_dynamics = self.sample_noise(next_obs.shape, next_obs.device)
+            next_obs_t = time_expanded_state * noise_dynamics + (1 - time_expanded_state) * next_obs
+            u_t_dynamics = noise_dynamics - next_obs
 
             # Task 3: Inverse Dynamics (next_obs + noisy_action -> action)
             noise_inv_dynamics = self.sample_noise(actions.shape, actions.device)
@@ -622,13 +620,13 @@ class PI0Pytorch(nn.Module):
         suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t, time)
 
         # Embed alignment suffix (Alignment Expert) if enabled
-        if use_alignment_expert and next_obs_features is not None:
+        if use_alignment_expert and next_obs is not None:
             alignment_suffix_embs, alignment_pad_masks, alignment_att_masks, alignment_adarms_cond, block_diagonal_ranges = \
                 self.embed_alignment_suffix(
                     noisy_state=state_t,
                     actions=actions,  # clean actions for dynamics task
                     noisy_next_obs_features=next_obs_t,
-                    next_obs_embedding=next_obs_features,  # clean next_obs for inverse dynamics task
+                    next_obs_embedding=next_obs,  # clean next_obs for inverse dynamics task
                     noisy_actions=actions_t_inv,
                     timestep=time,
                 )
@@ -751,255 +749,171 @@ class PI0Pytorch(nn.Module):
 
         return action_loss, alignment_losses
 
-    def align(
-        self,
-        device,
-        observation,
-        actions,
-        next_obs_features,
-        optimizer=None,
-        learning_rate=1e-4,
-        num_steps=10,
-        loss_threshold=None,
-        loss_weights=None,
-        return_loss_history=False,
-    ):
-        """Perform online adaptation by optimizing TTT parameters using alignment expert's self-supervised losses.
 
-        This function should be called when the robot enters a new environment. It adapts the embodiment
-        context (TTT parameters W1, b1) to the new environment by minimizing alignment losses. Once the
-        alignment loss drops below a threshold, the robot is considered adapted and ready to use sample_actions().
 
-        Args:
-            device: Device to run on
-            observation: Current observation (same format as sample_actions)
-            actions: Ground truth actions from the environment [batch_size, action_horizon, action_dim]
-                    Can be obtained from play data, teleoperation, or scripted policies
-            next_obs_features: Features from next observation [batch_size, feature_dim]
-                             Can be extracted using DINO or other vision encoders
-            optimizer: Optional optimizer for TTT parameters. If None, creates Adam optimizer
-            learning_rate: Learning rate for TTT parameter optimization (default: 1e-4)
-            num_steps: Number of gradient steps to perform (default: 10)
-            loss_threshold: Optional threshold for early stopping. If alignment loss < threshold, stop early
-            loss_weights: Optional dict with keys ['perception', 'dynamics', 'inverse_dynamics']
-                        specifying weights for each alignment task. Default: equal weights (1.0 each)
-            return_loss_history: If True, return loss history for monitoring (default: False)
+    def get_ttt_parameters(self):
+        """收集所有 TTT 层的可训练参数
 
         Returns:
-            If return_loss_history=False: total_alignment_loss (scalar)
-            If return_loss_history=True: (total_alignment_loss, loss_history_dict)
-                where loss_history_dict contains lists of losses for each task
-
-        Example usage:
-            # In a new environment, first align:
-            for i in range(max_align_iterations):
-                obs, actions, next_obs_features = collect_play_data()  # from teleoperation
-                loss = model.align(device, obs, actions, next_obs_features)
-                if loss < threshold:
-                    print(f"Alignment converged after {i} iterations")
-                    break
-
-            # After alignment, use sample_actions for inference:
-            predicted_actions = model.sample_actions(device, observation)
+            list: TTT 层的可训练参数列表
         """
-        if not getattr(self.config, 'use_alignment_expert', False):
-            raise ValueError("Alignment expert is not enabled. Set use_alignment_expert=True in config.")
-
-        # Set loss weights
-        if loss_weights is None:
-            loss_weights = {'perception': 1.0, 'dynamics': 1.0, 'inverse_dynamics': 1.0}
-
-        # Collect TTT parameters from both Action Expert and Alignment Expert
-        # Since they share the same TTT instances (singleton pattern), we only need to collect once
         ttt_params = []
-        if getattr(self.config, 'use_ttt', False):
-            # Collect from Action Expert (which shares parameters with Alignment Expert)
-            for layer in self.paligemma_with_expert.gemma_expert.model.layers:
-                if hasattr(layer, 'ttt_layer') and layer.ttt_layer is not None:
-                    # Collect W1, b1 parameters
-                    if hasattr(layer.ttt_layer, 'W1'):
-                        ttt_params.append(layer.ttt_layer.W1)
-                    if hasattr(layer.ttt_layer, 'b1'):
-                        ttt_params.append(layer.ttt_layer.b1)
+        for name, param in self.named_parameters():
+            if 'ttt' in name.lower() and param.requires_grad:
+                ttt_params.append(param)
+                logging.debug(f"Found TTT parameter: {name}, shape: {param.shape}")
 
         if len(ttt_params) == 0:
-            logging.warning("No TTT parameters found. Alignment will have no effect.")
-            return 0.0
-
-        # Create optimizer if not provided
-        if optimizer is None:
-            optimizer = torch.optim.Adam(ttt_params, lr=learning_rate)
-
-        # Initialize loss history
-        if return_loss_history:
-            loss_history = {
-                'total': [],
-                'perception': [],
-                'dynamics': [],
-                'inverse_dynamics': [],
-            }
-
-        # Set model to training mode for alignment (enables gradient computation)
-        training_mode = self.training
-        self.train()
-
-        # Perform alignment steps
-        for step in range(num_steps):
-            optimizer.zero_grad()
-
-            # Forward pass with alignment expert (similar to training forward)
-            # Use a fixed timestep for alignment (e.g., t=0.5)
-            time = torch.full((actions.shape[0],), 0.5, dtype=torch.float32, device=device)
-
-            images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(observation, train=True)
-
-            # Prepare diffusion inputs for alignment tasks
-            time_expanded = time[:, None, None]
-            time_expanded_state = time[:, None]
-
-            # Task 1: Perception
-            noise_perception = self.sample_noise(state.shape, state.device)
-            state_t = time_expanded_state * noise_perception + (1 - time_expanded_state) * state
-            u_t_perception = noise_perception - state
-
-            # Task 2: Dynamics
-            noise_dynamics = self.sample_noise(next_obs_features.shape, next_obs_features.device)
-            next_obs_t = time_expanded_state * noise_dynamics + (1 - time_expanded_state) * next_obs_features
-            u_t_dynamics = noise_dynamics - next_obs_features
-
-            # Task 3: Inverse Dynamics
-            noise_inv_dynamics = self.sample_noise(actions.shape, actions.device)
-            actions_t_inv = time_expanded * noise_inv_dynamics + (1 - time_expanded) * actions
-            u_t_inv_dynamics = noise_inv_dynamics - actions
-
-            # Embed prefix (VLM)
-            prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
-
-            # Embed alignment suffix
-            alignment_suffix_embs, alignment_pad_masks, alignment_att_masks, alignment_adarms_cond, block_diagonal_ranges = \
-                self.embed_alignment_suffix(
-                    noisy_state=state_t,
-                    actions=actions,
-                    noisy_next_obs_features=next_obs_t,
-                    next_obs_embedding=next_obs_features,
-                    noisy_actions=actions_t_inv,
-                    timestep=time,
-                )
-
-            # Convert to bfloat16 if needed
-            if (
-                self.paligemma_with_expert.paligemma.language_model.layers[0].self_attn.q_proj.weight.dtype
-                == torch.bfloat16
-            ):
-                prefix_embs = prefix_embs.to(dtype=torch.bfloat16)
-                alignment_suffix_embs = alignment_suffix_embs.to(dtype=torch.bfloat16)
-
-            # Concatenate masks
-            pad_masks = torch.cat([prefix_pad_masks, alignment_pad_masks], dim=1)
-            att_masks = torch.cat([prefix_att_masks, alignment_att_masks], dim=1)
-
-            # Adjust block_diagonal_ranges
-            prefix_len = prefix_pad_masks.shape[1]
-            adjusted_block_diagonal_ranges = [
-                (start + prefix_len, end + prefix_len)
-                for start, end in block_diagonal_ranges
-            ]
-
-            att_2d_masks = make_att_2d_masks(pad_masks, att_masks, block_diagonal_ranges=adjusted_block_diagonal_ranges)
-            position_ids = torch.cumsum(pad_masks, dim=1) - 1
-            att_2d_masks_4d = self._prepare_attention_masks_4d(att_2d_masks)
-
-            # Forward through Alignment Expert only (VLM prefix + alignment suffix)
-            inputs_embeds = [prefix_embs, None, alignment_suffix_embs]
-            adarms_cond_list = [None, None, alignment_adarms_cond]
-
-            outputs, _ = self.paligemma_with_expert.forward(
-                attention_mask=att_2d_masks_4d,
-                position_ids=position_ids,
-                past_key_values=None,
-                inputs_embeds=inputs_embeds,
-                use_cache=False,
-                adarms_cond=adarms_cond_list,
-            )
-
-            # Extract alignment expert output
-            alignment_out = outputs[2] if len(outputs) > 2 else None
-
-            if alignment_out is None:
-                raise RuntimeError("Alignment expert output is None. Check model configuration.")
-
-            alignment_out = alignment_out.to(dtype=torch.float32)
-
-            # Compute alignment losses
-            action_horizon = self.config.action_horizon
-
-            # Task 1: Perception
-            perception_hidden = alignment_out[:, 0]
-            v_t_perception = self.perception_head(perception_hidden)
-            perception_loss = F.mse_loss(v_t_perception, u_t_perception, reduction="mean")
-
-            # Task 2: Dynamics
-            next_obs_seq_len = 1  # TODO: handle variable length
-            dynamics_start = 1
-            dynamics_end = 1 + action_horizon + next_obs_seq_len
-            dynamics_hidden = alignment_out[:, dynamics_start:dynamics_end].mean(dim=1)
-            v_t_dynamics = self.dynamics_head(dynamics_hidden)
-            dynamics_loss = F.mse_loss(v_t_dynamics, u_t_dynamics, reduction="mean")
-
-            # Task 3: Inverse Dynamics
-            inv_dynamics_hidden = alignment_out[:, -action_horizon:]
-            v_t_inv_dynamics = self.inverse_dynamics_head(inv_dynamics_hidden)
-            inverse_dynamics_loss = F.mse_loss(v_t_inv_dynamics, u_t_inv_dynamics, reduction="mean")
-
-            # Compute weighted total loss
-            total_loss = (
-                loss_weights['perception'] * perception_loss +
-                loss_weights['dynamics'] * dynamics_loss +
-                loss_weights['inverse_dynamics'] * inverse_dynamics_loss
-            )
-
-            # Backward and optimize
-            total_loss.backward()
-            optimizer.step()
-
-            # Record loss history
-            if return_loss_history:
-                loss_history['total'].append(total_loss.item())
-                loss_history['perception'].append(perception_loss.item())
-                loss_history['dynamics'].append(dynamics_loss.item())
-                loss_history['inverse_dynamics'].append(inverse_dynamics_loss.item())
-
-            # Log progress
-            if step % max(1, num_steps // 10) == 0:
-                logging.info(
-                    f"Align step {step}/{num_steps}: "
-                    f"total={total_loss.item():.6f}, "
-                    f"perception={perception_loss.item():.6f}, "
-                    f"dynamics={dynamics_loss.item():.6f}, "
-                    f"inverse_dynamics={inverse_dynamics_loss.item():.6f}"
-                )
-
-            # Early stopping if threshold is reached
-            if loss_threshold is not None and total_loss.item() < loss_threshold:
-                logging.info(f"Alignment converged at step {step} with loss {total_loss.item():.6f}")
-                break
-
-        # Restore original training mode
-        self.train(training_mode)
-
-        # Return results
-        final_loss = total_loss.item()
-        if return_loss_history:
-            return final_loss, loss_history
+            logging.warning("No TTT parameters found in the model. Check if use_ttt=True in config.")
         else:
-            return final_loss
+            logging.info(f"Collected {len(ttt_params)} TTT parameters for alignment")
+
+        return ttt_params
+
+    def update_online_buffer(self, observation, action):
+        """更新 online buffer
+
+        将执行动作后的交互数据存入 buffer，供后续 align 使用
+
+        Args:
+            observation: Observation 对象
+            action: 执行的动作 [action_horizon, action_dim]
+        """
+        self.buffer.add(observation, action)
+
+
+    def get_data_from_buffer(self):
+        """从 buffer 采样训练数据
+
+        Returns:
+            tuple: (obs_images, obs_states, actions, next_obs_images, next_obs_states)
+        """
+        batch_size = self.align_kwargs.get('batch_size', 32)
+
+        if len(self.buffer) < 2:
+            logging.warning(f"Buffer has only {len(self.buffer)} samples, need at least 2 for training")
+            return None
+
+        # 调用 buffer.sample() 获取数据
+        sampled_data = self.buffer.sample(batch_size)
+
+        return sampled_data
+
+    def align(self, device):
+        """使用 buffer 中的数据优化 TTT 参数
+
+        执行在线对齐优化:
+        1. 从 buffer 采样连续帧对 (obs_t, action_t, obs_t+1)
+        2. 只优化 TTT 参数(使用持久化的 optimizer)
+        3. 使用 alignment expert 计算三个自监督任务的损失
+
+        Args:
+            device: 计算设备
+
+        Returns:
+            dict: {'avg_loss': float} 或 None(如果跳过优化)
+        """
+        # 1. 检查 buffer 大小
+        min_buffer_size = self.align_kwargs.get('min_buffer_size', 20)
+        if len(self.buffer) < min_buffer_size:
+            logging.info(f"Buffer size ({len(self.buffer)}) < min_buffer_size ({min_buffer_size}), skipping align")
+            return None
+
+        # 2. 从 buffer 采样数据
+        sampled_data = self.get_data_from_buffer()
+        if sampled_data is None:
+            return None
+
+        # 3. 收集 TTT 参数并初始化 optimizer(如果还未初始化)
+        ttt_params = self.get_ttt_parameters()
+        if len(ttt_params) == 0:
+            logging.warning("No TTT parameters found, skipping align")
+            return None
+
+        # 4. 初始化 optimizer(只在第一次调用时)
+        if self.align_optimizer is None:
+            learning_rate = self.align_kwargs.get('learning_rate', 1e-4)
+            self.align_optimizer = torch.optim.Adam(ttt_params, lr=learning_rate)
+            logging.info(f"Initialized align optimizer with lr={learning_rate} for {len(ttt_params)} TTT parameters")
+
+        # 5. 执行多步优化
+        align_steps = self.align_kwargs.get('align_steps', 5)
+        prev_training_mode = self.training
+        self.train()  # 设置为训练模式以启用 alignment expert
+
+        total_loss = 0.0
+        for step in range(align_steps):
+            self.align_optimizer.zero_grad()
+
+            # 从 sampled_data 提取数据
+            observations = sampled_data['observations']  # List[Observation]
+            actions = sampled_data['actions'].to(device)  # [batch_size, action_horizon, action_dim]
+            next_observations = sampled_data['next_observations']  # List[Observation]
+
+            # 将 List[Observation] batch 成单个 Observation
+            # TODO: 需要实现 batch_observations() 辅助函数
+            from openpi.models.model import Observation
+
+            # 简单实现: 取第一个样本的 observation 进行 forward
+            # TODO: 未来支持真正的 batch
+            batch_size = len(observations)
+
+            # Batch images: {key: [obs1[key], obs2[key], ...]} -> {key: stack([...])}
+            batched_images = {}
+            batched_image_masks = {}
+            for key in observations[0].images.keys():
+                batched_images[key] = torch.stack([obs.images[key] for obs in observations]).to(device)
+                batched_image_masks[key] = torch.stack([obs.image_masks[key] for obs in observations]).to(device)
+
+            # Batch states
+            batched_states = torch.stack([obs.state for obs in observations]).to(device)
+
+            # Batch next_obs states (for alignment expert)
+            next_obs_states = torch.stack([obs.state for obs in next_observations]).to(device)
+
+            # Create batched Observation
+            observation = Observation(
+                images=batched_images,
+                image_masks=batched_image_masks,
+                state=batched_states,
+                tokenized_prompt=observations[0].tokenized_prompt,
+                tokenized_prompt_mask=observations[0].tokenized_prompt_mask,
+            )
+
+            # 调用 forward 计算 alignment loss
+            # TODO: 未来可以使用 next_observations 的视觉特征
+            # 目前只使用 next_obs_states (proprioceptive state)
+            action_loss, alignment_losses = self.forward(
+                observation=observation,
+                actions=actions,
+                next_obs=next_obs_states
+            )
+
+            # 只优化 alignment losses(不优化 action_loss)
+            align_loss = (
+                alignment_losses['perception_loss'].mean() +
+                alignment_losses['dynamics_loss'].mean() +
+                alignment_losses['inverse_dynamics_loss'].mean()
+            )
+
+            align_loss.backward()
+            self.align_optimizer.step()
+
+            total_loss += align_loss.item()
+            logging.debug(f"Align step {step}/{align_steps}, loss: {align_loss.item():.4f}")
+
+        # 恢复原来的训练模式
+        self.train(prev_training_mode)
+
+        avg_loss = total_loss / align_steps
+        logging.info(f"Alignment completed: {align_steps} steps, avg loss: {avg_loss:.4f}")
+
+        return {'avg_loss': avg_loss}
+
 
     @torch.no_grad()
-    def sample_actions(self, device, observation, noise=None, num_steps=10) -> Tensor:
+    def sample_actions(self, device, observation, noise=None, num_steps=10, use_align=False, align_type="online") -> Tensor:
         """Do a full inference forward and compute the action (batch_size x num_steps x num_motors)"""
-        # Reset TTT loss tracker before inference
-        if self.ttt_loss_tracker is not None:
-            self.ttt_loss_tracker.reset()
 
         bsize = observation.state.shape[0]
         if noise is None:
@@ -1043,9 +957,24 @@ class PI0Pytorch(nn.Module):
             x_t = x_t + dt * v_t
             time += dt
 
-        # Print TTT loss summary after inference
-        if self.ttt_loss_tracker is not None:
-            self.ttt_loss_tracker.next_step()
+        # 在线适应: 更新 buffer 并根据频率执行 align
+        if use_align:
+            # 1. 更新 buffer(每次推理都更新)
+            self.update_online_buffer(observation, x_t)
+
+            # 2. 增加步数计数器
+            self.align_step_counter += 1
+
+            # 3. 检查是否需要执行 align(根据频率)
+            align_frequency = self.align_kwargs.get('align_frequency', 10)
+            if self.align_step_counter % align_frequency == 0:
+                logging.info(f"Running online alignment at step {self.align_step_counter}")
+                align_result = self.align(device)
+
+                if align_result is not None:
+                    logging.info(f"Alignment result: {align_result}")
+                else:
+                    logging.info("Alignment skipped (buffer not ready or no TTT parameters)")
 
         return x_t
 
