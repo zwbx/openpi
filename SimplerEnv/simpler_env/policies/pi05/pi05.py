@@ -173,6 +173,8 @@ class Pi05Inference:
                 "image": np.array(images[0]),
                 "prompt": task_description,
             }
+            
+            # action_chunk = self.policy_client.infer(observation, use_align=True, align_type="online")["actions"][:self.pred_action_horizon]
             action_chunk = self.policy_client.infer(observation)["actions"][:self.pred_action_horizon]
             self.action_plan.extend(action_chunk[: self.exec_horizon])
 
