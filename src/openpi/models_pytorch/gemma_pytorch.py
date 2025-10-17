@@ -92,8 +92,6 @@ class PaliGemmaWithExpertModel(nn.Module):
             self.alignment_expert = GemmaForCausalLM(config=alignment_expert_config_hf)
             self.alignment_expert.model.embed_tokens = None
 
-            # Share TTT parameters between Action Expert and Alignment Expert
-            self._share_ttt_parameters()
         else:
             self.alignment_expert = None
 
