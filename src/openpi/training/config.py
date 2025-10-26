@@ -794,7 +794,7 @@ _CONFIGS = [
     TrainConfig(
         name="pi05_simpler_debug",
         # model=pi0_config.Pi0Config(pi05=True, discrete_state_input=True),
-        model=pi0_config.Pi0Config(paligemma_variant="dummy", action_expert_variant="dummy", discrete_state_input=True),
+        model=pi0_config.Pi0Config(paligemma_variant="dummy", action_expert_variant="dummy", alignment_expert_variant="dummy", discrete_state_input=True),
         data=LeRobotSimplerDataConfig(
             repo_id="lerobot-pi0-bridge",
             base_config=DataConfig(
@@ -838,17 +838,12 @@ _CONFIGS = [
         num_workers=32,  # 减少工作进程避免资源竞争
     ),
     TrainConfig(
-        name="pi05_simpler_zscore_ttt",
+        name="pi05_simpler_zscore_align",
         model=pi0_config.Pi0Config(
             pi05=True,
             discrete_state_input=True,
-            use_ttt=True,
-            ttt_layer_type="linear",  # Linear TTT with closed-form solution (dual form)
-            ttt_layer_positions="all",  # Apply TTT to all layers; can also use list like [14, 15, 16, 17] for specific layers
-            use_dual_form=True,
-            ttt_base_lr=5e-5,
-            ttt_keep_state=False,  # Whether to keep TTT state across forward calls during inference
-            ttt_track_loss=True,  # Whether to track and print TTT reconstruction loss during inference
+            use_align=True,
+            
         ),
         data=LeRobotSimplerDataConfig(
             repo_id="lerobot-pi0-bridge",
@@ -1113,7 +1108,7 @@ _CONFIGS = [
         name="debug",
         data=FakeDataConfig(),
         batch_size=2,
-        model=pi0_config.Pi0Config(paligemma_variant="dummy", action_expert_variant="dummy"),
+        model=pi0_config.Pi0Config(paligemma_variant="dummy", action_expert_variant="dummy",alignment_expert_variant="dummy"),
         save_interval=100,
         overwrite=True,
         exp_name="debug",
