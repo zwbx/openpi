@@ -91,12 +91,16 @@ class EmbodimentConfig:
     # ========== 影响 embodiment context 的因素 ==========
     # 这些字段会参与 EmbodimentKey 的计算
 
+    #dataset 
+    dataset_name: str  # 
+
     # Robot configuration
     robot_type: str = "franka"
     dof: int = 7
 
     # Action/State space
     action_space: str = "cartesian"  # "cartesian" | "joint"
+    action_space_delta: bool = False  # 是否使用 delta action space
     state_space: str = "cartesian"  # "cartesian" | "joint"
     coordinate_frame: str = "base"  # "base" | "world" | "camera"
 
