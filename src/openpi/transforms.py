@@ -205,7 +205,32 @@ class ResizeImages(DataTransformFn):
     width: int
 
     def __call__(self, data: DataDict) -> DataDict:
-        data["image"] = {k: image_tools.resize_with_pad(v, self.height, self.width) for k, v in data["image"].items()}
+        resized_images = {}
+        for k, v in data["image"].items():
+            # Check if image has temporal dimension from delta_timestamps
+            # LeRobot format: (T, C, H, W) where T=2 for current+next frame
+            if len(v.shape) == 4 and v.shape[0] == 2 and v.shape[1] in [1, 3]:  # T=2, C=1 or 3
+                # Convert from (T, C, H, W) to (T, H, W, C) for resize_with_pad
+                v_hwc = np.transpose(v, (0, 2, 3, 1))  # (2, H, W, C)
+
+                # Resize each frame separately
+                resized_frames = [
+                    image_tools.resize_with_pad(v_hwc[0], self.height, self.width),  # (H', W', C)
+                    image_tools.resize_with_pad(v_hwc[1], self.height, self.width)   # (H', W', C)
+                ]
+
+                # Stack back: (2, H', W', C)
+                resized_images[k] = np.stack(resized_frames, axis=0)
+
+            elif len(v.shape) == 3:
+                # Standard case: (C, H, W) -> convert to (H, W, C)
+                v_hwc = np.transpose(v, (1, 2, 0))
+                resized_images[k] = image_tools.resize_with_pad(v_hwc, self.height, self.width)
+            else:
+                # Already in (H, W, C) format or other format
+                resized_images[k] = image_tools.resize_with_pad(v, self.height, self.width)
+
+        data["image"] = resized_images
         return data
 
 
