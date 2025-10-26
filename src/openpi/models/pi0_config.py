@@ -37,6 +37,14 @@ class AlignConfig:
     # Frequency of alignment calls (every N inference steps)
     align_frequency: int = 10
 
+    # PEFT prefix token configuration
+    peft_num_tokens: int = 1  # Number of tokens per embodiment
+    peft_token_bank_size: int = 1024  # Maximum number of embodiments (can be dynamically expanded)
+    peft_init: str = "zeros"  # "zeros" | "normal"
+
+    # Embodiment Registry configuration
+    embodiment_registry_mode: str = "auto"  # "auto" | "manual"
+    embodiment_registry_path: str = None  # Path to load pre-registered configurations
 
 @dataclasses.dataclass(frozen=True)
 class Pi0Config(_model.BaseModelConfig):
@@ -56,18 +64,15 @@ class Pi0Config(_model.BaseModelConfig):
     # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
     discrete_state_input: bool = None  # type: ignore
 
-    # TTT (Test-Time Training) layer configuration
-    use_ttt: bool = False
-    ttt_layer_type: str = "linear"  # Type of TTT layer: "linear" (closed-form solution)
-    ttt_layer_positions: list = None  # type: ignore  # List of layer indices where TTT should be applied
-    use_dual_form: bool = True  # Whether to use dual form for TTT (closed-form solution, more memory efficient)
-    ttt_base_lr: float = 5e-5  # Base learning rate for TTT layer (scaled by 1/head_dim internally)
-
-    # alignment expert configuration
+    # Online Align Layer configuration (for online adaptation during inference)
     use_alignment_expert: bool = False
 
     # Online alignment configuration (will be converted to dict for PyTorch model)
-    align_config: AlignConfig = dataclasses.field(default_factory=AlignConfig)
+    align_config: AlignConfig = dataclasses.field(default_factory=AlignConfig) if use_alignment_expert else None
+
+    # Attention restriction configuration
+    # If True, image tokens cannot attend to language tokens (unidirectional: lang->image only)
+    restrict_image_to_language: bool = False
 
 
     def __post_init__(self):
