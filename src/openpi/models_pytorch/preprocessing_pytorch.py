@@ -145,9 +145,9 @@ def preprocess_observation_pytorch(
             # Back to [-1, 1]
             image = image * 2.0 - 1.0
 
-        # Convert back to [B, C, H, W] format if it was originally channels-first
-        if is_channels_first:
-            image = image.permute(0, 3, 1, 2)  # [B, H, W, C] -> [B, C, H, W]
+        # Ensure output is [B, C, H, W] for vision tower (Conv2d expects channels-first)
+        if image.shape[-1] == 3:  # currently channels-last [B, H, W, C]
+            image = image.permute(0, 3, 1, 2)  # -> [B, C, H, W]
 
         out_images[key] = image
 
