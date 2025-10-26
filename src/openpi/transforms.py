@@ -112,6 +112,24 @@ class InjectDefaultPrompt(DataTransformFn):
 
 
 @dataclasses.dataclass(frozen=True)
+class InjectEmbodimentKey(DataTransformFn):
+    embodiment_key: str | None
+
+    def __call__(self, data: DataDict) -> DataDict:
+        if self.embodiment_key is not None and "embodiment_key" not in data:
+            data["embodiment_key"] = np.asarray(self.embodiment_key)
+        return data
+
+@dataclasses.dataclass(frozen=True)
+class InjectEmbodimentKey(DataTransformFn):
+    model_config: str | None
+
+    def __call__(self, data: DataDict) -> DataDict:
+        if self.embodiment_key is not None and "embodiment_key" not in data:
+            data["embodiment_key"] = np.asarray(self.embodiment_key)
+        return data
+
+@dataclasses.dataclass(frozen=True)
 class Normalize(DataTransformFn):
     norm_stats: at.PyTree[NormStats] | None
     # If true, will use quantile normalization. Otherwise, normal z-score normalization will be used.
