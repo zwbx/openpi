@@ -1,5 +1,6 @@
 import logging
 import math
+import dataclasses
 
 import torch
 from torch import Tensor
@@ -9,16 +10,79 @@ import torch.nn.functional as F  # noqa: N812
 import openpi.models.gemma as _gemma
 from openpi.models_pytorch.gemma_pytorch import PaliGemmaWithExpertModel
 import openpi.models_pytorch.preprocessing_pytorch as _preprocessing
+from openpi.shared.embodiment_config import EmbodimentRegistry, EmbodimentConfig, EmbodimentKey
 import random
 import time
 
-# Import TTTLossTracker for tracking TTT layer losses during inference
-try:
-    from transformers.models.gemma.ttt_with_gate import TTTLossTracker
-    TTT_LOSS_TRACKING_AVAILABLE = True
-except ImportError:
-    TTT_LOSS_TRACKING_AVAILABLE = False
-    TTTLossTracker = None
+
+# ============================================================================
+# TEMPORARY: Random Embodiment Keys Generator (for development)
+# TODO: Remove this when data loader provides real embodiment_keys
+# ============================================================================
+
+def _generate_random_embodiment_key(seed: int | None = None) -> EmbodimentKey:
+    """
+    临时函数：生成随机的 EmbodimentKey 用于开发测试
+
+    注意：这只是临时方案，真实的 embodiment_keys 应该从 dataloader 传入
+
+    Args:
+        seed: 随机种子（可选）
+
+    Returns:
+        随机生成的 EmbodimentKey
+    """
+    if seed is not None:
+        rng = random.Random(seed)
+    else:
+        rng = random
+
+    # 随机选择 robot 配置
+    robot_configs = [
+        ("simpler", 7, "cartesian"),
+        ("franka", 7, "cartesian"),
+        ("aloha", 14, "joint"),
+        ("ur5", 6, "joint"),
+    ]
+
+    robot_type, dof, action_space = rng.choice(robot_configs)
+
+    return EmbodimentKey(
+        robot_type=robot_type,
+        dof=dof,
+        action_space=action_space,
+        state_space=rng.choice(["cartesian", "joint"]),
+        coordinate_frame=rng.choice(["base", "world"]),
+        image_crop=rng.choice([True, False]),
+        image_rotation=rng.choice([True, False]),
+        image_flip=False,  # 较少使用
+        camera_viewpoint_id="default",
+    )
+
+
+def _generate_random_embodiment_keys_batch(batch_size: int, same_embodiment: bool = True) -> list[EmbodimentKey]:
+    """
+    临时函数：为一个 batch 生成随机的 embodiment_keys
+
+    Args:
+        batch_size: batch 大小
+        same_embodiment: 是否让整个 batch 使用相同的 embodiment
+                        True: 模拟单数据集训练
+                        False: 模拟多数据集混合训练
+
+    Returns:
+        List of EmbodimentKey，长度为 batch_size
+    """
+    if same_embodiment:
+        # 整个 batch 使用相同的 embodiment（单数据集场景）
+        key = _generate_random_embodiment_key()
+        return [key] * batch_size
+    else:
+        # 每个样本随机选择 embodiment（多数据集场景）
+        return [_generate_random_embodiment_key(seed=i) for i in range(batch_size)]
+
+
+# ============================================================================
 
 
 class AlignBuffer:
@@ -192,7 +256,17 @@ class PI0Pytorch(nn.Module):
         super().__init__()
         self.config = config
         self.pi05 = config.pi05
-        self.align_kwargs = config.align_kwargs.copy()
+        # Convert AlignConfig to dict for PyTorch model
+        if hasattr(config, 'align_config'):
+            self.align_kwargs = dataclasses.asdict(config.align_config)
+        else:
+            # Fallback for backward compatibility
+            self.align_kwargs = {
+                'batch_size': 32,
+                'buffer_size': 20,
+                'lr': 1e-4,
+                'steps_each_interaction': 5,
+            }
 
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
@@ -220,13 +294,48 @@ class PI0Pytorch(nn.Module):
             use_adarms=use_adarms,
             use_alignment_expert=use_alignment_expert,
             precision=config.dtype,
-            use_ttt=getattr(config, 'use_ttt', False),
-            ttt_layer_positions=getattr(config, 'ttt_layer_positions', None),
-            use_dual_form=getattr(config, 'use_dual_form', True),
         )
 
         self.action_in_proj = nn.Linear(32, action_expert_config.width)
         self.action_out_proj = nn.Linear(action_expert_config.width, 32)
+
+        # PEFT prefix token bank (E-Token Bank) using nn.Embedding
+        self.use_peft_prefix_token = bool(getattr(config, 'use_peft_prefix_token', False))
+        self.peft_num_tokens = int(getattr(config, 'peft_num_tokens', 1)) if self.use_peft_prefix_token else 0
+        self.peft_token_bank_size = int(getattr(config, 'peft_token_bank_size', 32)) if self.use_peft_prefix_token else 0
+        self.peft_init = getattr(config, 'peft_init', 'zeros')
+
+        if self.use_peft_prefix_token and self.peft_num_tokens > 0:
+            # Initialize token bank using nn.Embedding
+            # num_embeddings: bank_size (max number of embodiments)
+            # embedding_dim: num_tokens * hidden_dim (flattened)
+            embedding_dim = self.peft_num_tokens * action_expert_config.width
+            self.peft_prefix_token_bank = nn.Embedding(
+                num_embeddings=self.peft_token_bank_size,
+                embedding_dim=embedding_dim
+            )
+
+            # Initialize weights
+            if self.peft_init == 'normal':
+                nn.init.normal_(self.peft_prefix_token_bank.weight, mean=0.0, std=0.02)
+            else:  # 'zeros'
+                nn.init.zeros_(self.peft_prefix_token_bank.weight)
+
+            # Store shape info for reshaping
+            self.token_hidden_dim = action_expert_config.width
+
+            # Initialize Embodiment Registry
+            embodiment_mode = getattr(config, 'embodiment_registry_mode', 'auto')
+            self.embodiment_registry = EmbodimentRegistry(mode=embodiment_mode)
+
+            # Load pre-registered embodiments if path provided
+            embodiment_path = getattr(config, 'embodiment_registry_path', None)
+            if embodiment_path is not None:
+                self.embodiment_registry.load(embodiment_path)
+                logging.info(f"Loaded embodiment registry: {len(self.embodiment_registry)} embodiments")
+        else:
+            self.peft_prefix_token_bank = None
+            self.embodiment_registry = None
 
         # Alignment expert prediction heads (if enabled)
         if use_alignment_expert:
@@ -260,8 +369,8 @@ class PI0Pytorch(nn.Module):
         # 在线适应的步数计数器
         self.align_step_counter = 0
 
-        # 在线适应的 optimizer (只优化 TTT 参数)
-        # 将在第一次 align() 调用时初始化(需要等待 TTT 参数可用)
+        # 在线适应的 optimizer (只优化 E-Token 参数)
+        # 将在第一次 align() 调用时初始化
         self.align_optimizer = None
 
         msg = "transformers_replace is not installed correctly. Please install it with `uv pip install transformers==4.53.2` and `cp -r ./src/openpi/models_pytorch/transformers_replace/* .venv/lib/python3.11/site-packages/transformers/`."
@@ -272,6 +381,52 @@ class PI0Pytorch(nn.Module):
                 raise ValueError(msg)
         except ImportError:
             raise ValueError(msg) from None
+
+    def get_embodiment_token(self, embodiment_keys, batch_size: int):
+        """
+        根据 embodiment key 获取对应的 E-Token
+
+        Args:
+            embodiment_keys: EmbodimentKey 或 List[EmbodimentKey] (batch)
+            batch_size: batch size
+
+        Returns:
+            e_token: [batch_size, num_tokens, hidden_dim]
+        """
+        if not self.use_peft_prefix_token or self.peft_prefix_token_bank is None:
+            return None
+
+        # 转换为 list
+        if not isinstance(embodiment_keys, list):
+            embodiment_keys = [embodiment_keys] * batch_size
+
+        # 获取每个样本的 embodiment ID
+        embodiment_ids = []
+        for key in embodiment_keys:
+            # 将 key 转为临时 config 以使用 registry
+            temp_config = EmbodimentConfig(
+                dataset_name=key.robot_type,  # 临时使用 robot_type
+                robot_type=key.robot_type,
+                dof=key.dof,
+                action_space=key.action_space,
+                state_space=key.state_space,
+                coordinate_frame=key.coordinate_frame,
+                image_crop=key.image_crop,
+                image_rotation=key.image_rotation,
+                image_flip=key.image_flip,
+                camera_viewpoint_id=key.camera_viewpoint_id,
+            )
+            embodiment_id = self.embodiment_registry.get_or_register(temp_config)
+            embodiment_ids.append(embodiment_id)
+
+        # 从 nn.Embedding 中查询 tokens
+        embodiment_ids = torch.tensor(embodiment_ids, dtype=torch.long, device=self.peft_prefix_token_bank.weight.device)
+        e_tokens_flat = self.peft_prefix_token_bank(embodiment_ids)  # [batch_size, num_tokens * hidden_dim]
+
+        # Reshape to [batch_size, num_tokens, hidden_dim]
+        e_tokens = e_tokens_flat.view(batch_size, self.peft_num_tokens, self.token_hidden_dim)
+
+        return e_tokens
 
     def gradient_checkpointing_enable(self):
         """Enable gradient checkpointing for memory optimization."""
@@ -370,9 +525,17 @@ class PI0Pytorch(nn.Module):
         embs.append(lang_emb)
         pad_masks.append(lang_masks)
 
-        # full attention between image and language inputs
+        # Attention between image and language inputs
+        # If restrict_image_to_language=True, image tokens cannot attend to language tokens
+        # (unidirectional: language -> image only)
         num_lang_embs = lang_emb.shape[1]
-        att_masks += [0] * num_lang_embs
+        if getattr(self.config, 'restrict_image_to_language', False):
+            # Set language tokens as a new attention block (att_mask=1)
+            # This prevents image tokens from attending to language tokens
+            att_masks += [1] * num_lang_embs
+        else:
+            # Default: full attention between image and language inputs
+            att_masks += [0] * num_lang_embs
 
         embs = torch.cat(embs, dim=1)
         pad_masks = torch.cat(pad_masks, dim=1)
@@ -384,8 +547,15 @@ class PI0Pytorch(nn.Module):
 
         return embs, pad_masks, att_masks
 
-    def embed_suffix(self, state, noisy_actions, timestep):
-        """Embed state, noisy_actions, timestep to prepare for Expert Gemma processing."""
+    def embed_suffix(self, state, noisy_actions, timestep, embodiment_keys=None):
+        """Embed state, noisy_actions, timestep to prepare for Expert Gemma processing.
+
+        Args:
+            state: State input [batch_size, state_dim]
+            noisy_actions: Noisy actions [batch_size, action_horizon, action_dim]
+            timestep: Diffusion timestep [batch_size]
+            embodiment_keys: Optional EmbodimentKey or List[EmbodimentKey] for Token Bank
+        """
         embs = []
         pad_masks = []
         att_masks = []
@@ -446,6 +616,13 @@ class PI0Pytorch(nn.Module):
             action_time_emb = action_emb
             adarms_cond = time_emb
 
+        # Optionally prepend PEFT E-Token from Token Bank
+        if self.use_peft_prefix_token and self.peft_prefix_token_bank is not None:
+            bsize = action_time_emb.shape[0]
+            e_tok = self.get_embodiment_token(embodiment_keys, bsize)
+            if e_tok is not None:
+                action_time_emb = torch.cat([e_tok, action_time_emb], dim=1)
+
         # Add to input tokens
         embs.append(action_time_emb)
 
@@ -454,7 +631,8 @@ class PI0Pytorch(nn.Module):
         pad_masks.append(action_time_mask)
 
         # Set attention masks so that image, language and state inputs do not attend to action tokens
-        att_masks += [1] + ([0] * (self.config.action_horizon - 1))
+        # Start a new block at first suffix token (E-Token if enabled)
+        att_masks += [1] + ([0] * (action_time_dim - 1))
 
         embs = torch.cat(embs, dim=1)
         pad_masks = torch.cat(pad_masks, dim=1)
@@ -464,7 +642,7 @@ class PI0Pytorch(nn.Module):
         return embs, pad_masks, att_masks, adarms_cond
 
     def embed_alignment_suffix(self, noisy_state, actions, noisy_next_obs_features,
-                               next_obs_embedding, noisy_actions, timestep):
+                               next_obs_embedding, noisy_actions, timestep, embodiment_keys=None):
         """Embed alignment expert inputs for three self-supervised tasks.
 
         Tasks:
@@ -473,14 +651,32 @@ class PI0Pytorch(nn.Module):
         3. Inverse Dynamics: next_obs + noisy_actions -> actions
 
         Dynamics and Inverse Dynamics use block diagonal masks (cannot attend to each other).
+
+        Args:
+            noisy_state: Noisy state input [batch_size, state_dim]
+            actions: Clean actions for dynamics task [batch_size, action_horizon, action_dim]
+            noisy_next_obs_features: Noisy next observation features [batch_size, feature_dim]
+            next_obs_embedding: Clean next observation embedding [batch_size, feature_dim]
+            noisy_actions: Noisy actions for inverse dynamics [batch_size, action_horizon, action_dim]
+            timestep: Diffusion timestep [batch_size]
+            embodiment_keys: Optional EmbodimentKey or List[EmbodimentKey] for Token Bank
         """
         embs = []
         pad_masks = []
         att_masks = []
 
+        # Define bsize and device first
         bsize = noisy_state.shape[0]
         device = noisy_state.device
         action_horizon = self.config.action_horizon
+
+        # Optionally prepend PEFT E-Token from Token Bank to alignment suffix
+        if self.use_peft_prefix_token and self.peft_prefix_token_bank is not None:
+            e_tok = self.get_embodiment_token(embodiment_keys, bsize)
+            if e_tok is not None:
+                embs.append(e_tok)
+                pad_masks.append(torch.ones(bsize, e_tok.shape[1], dtype=torch.bool, device=device))
+                att_masks += [1] + ([0] * (e_tok.shape[1] - 1))
 
         # Process timestep for adaRMS
         time_emb = create_sinusoidal_pos_embedding(
@@ -505,7 +701,8 @@ class PI0Pytorch(nn.Module):
         pad_masks.append(torch.ones(bsize, 1, dtype=torch.bool, device=device))
         att_masks += [1]  # Perception starts new block
 
-        perception_end = 1
+        # Track running position to compute block ranges
+        dynamics_start = sum(m.shape[1] for m in pad_masks)
 
         # Task 2: Dynamics - embed actions + noisy_next_obs
         action_emb = self._apply_checkpoint(self.action_in_proj, actions)
@@ -526,7 +723,7 @@ class PI0Pytorch(nn.Module):
         pad_masks.append(torch.ones(bsize, next_obs_seq_len, dtype=torch.bool, device=device))
         att_masks += [0] * next_obs_seq_len
 
-        dynamics_end = perception_end + action_horizon + next_obs_seq_len
+        dynamics_end = sum(m.shape[1] for m in pad_masks)
 
         # Task 3: Inverse Dynamics - embed next_obs + noisy_actions
         if next_obs_embedding.ndim == 2:
@@ -546,7 +743,7 @@ class PI0Pytorch(nn.Module):
         # Block diagonal: Dynamics and Inverse Dynamics cannot see each other
         inverse_dynamics_start = dynamics_end
         inverse_dynamics_end = inverse_dynamics_start + next_obs_inv_len + action_horizon
-        block_diagonal_ranges = [(perception_end, dynamics_end), (inverse_dynamics_start, inverse_dynamics_end)]
+        block_diagonal_ranges = [(dynamics_start, dynamics_end), (inverse_dynamics_start, inverse_dynamics_end)]
 
         # Concatenate
         embs = torch.cat(embs, dim=1)
@@ -556,7 +753,7 @@ class PI0Pytorch(nn.Module):
 
         return embs, pad_masks, att_masks, adarms_cond, block_diagonal_ranges
 
-    def forward(self, observation, actions, noise=None, time=None, next_obs=None) -> Tensor:
+    def forward(self, observation, actions, noise=None, time=None, next_obs=None, embodiment_keys=None) -> Tensor:
         """Do a full training forward pass and compute the loss (batch_size x num_steps x num_motors)
 
         Args:
@@ -564,8 +761,9 @@ class PI0Pytorch(nn.Module):
             actions: Ground truth actions [batch_size, action_horizon, action_dim]
             noise: Optional noise for diffusion
             time: Optional timestep for diffusion
-            next_obs_features: Optional next observation features for alignment expert [batch_size, feature_dim]
-                              (e.g., DINO features from obs_t+1)
+            next_obs: Optional next observation features for alignment expert [batch_size, feature_dim]
+                     (e.g., DINO features from obs_t+1)
+            embodiment_keys: Optional EmbodimentKey or List[EmbodimentKey] for Token Bank
 
         Returns:
             If use_alignment_expert=False: action_loss tensor
@@ -578,6 +776,18 @@ class PI0Pytorch(nn.Module):
 
         if time is None:
             time = self.sample_time(actions.shape[0], actions.device)
+
+        # TEMPORARY: Generate random embodiment_keys if not provided
+        # TODO: Remove this when dataloader provides real embodiment_keys
+        if embodiment_keys is None:
+            batch_size = actions.shape[0]
+            # 使用 same_embodiment=True 模拟单数据集训练
+            # 设置为 False 可以测试多数据集场景
+            embodiment_keys = _generate_random_embodiment_keys_batch(
+                batch_size=batch_size,
+                same_embodiment=True  # 改为 False 测试多 embodiment
+            )
+            logging.debug(f"[TEMP] Generated random embodiment_keys: {embodiment_keys[0]}")
 
         # Action Expert: prepare diffusion inputs
         time_expanded = time[:, None, None]
@@ -617,7 +827,7 @@ class PI0Pytorch(nn.Module):
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
 
         # Embed action suffix (Action Expert)
-        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t, time)
+        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t, time, embodiment_keys=embodiment_keys)
 
         # Embed alignment suffix (Alignment Expert) if enabled
         if use_alignment_expert and next_obs is not None:
@@ -629,6 +839,7 @@ class PI0Pytorch(nn.Module):
                     next_obs_embedding=next_obs,  # clean next_obs for inverse dynamics task
                     noisy_actions=actions_t_inv,
                     timestep=time,
+                    embodiment_keys=embodiment_keys,
                 )
         else:
             alignment_suffix_embs = None
@@ -717,26 +928,27 @@ class PI0Pytorch(nn.Module):
         alignment_out = alignment_out.to(dtype=torch.float32)
 
         # Extract hidden states for three tasks from alignment_out
-        # Task structure: [perception(1), actions(action_h), next_obs(n), next_obs_emb(m), noisy_actions(action_h)]
+        # Task structure: [E(peft_k, optional), perception(1), dynamics(actions(h)+next_obs(n)), inv_dynamics(next_obs(m)+noisy_actions(h))]
         action_horizon = self.config.action_horizon
 
-        # Task 1: Perception - first token
-        perception_hidden = alignment_out[:, 0]  # [batch_size, hidden_dim]
+        # Derive ranges from block_diagonal_ranges returned by embed_alignment_suffix
+        # dynamics_range = block_diagonal_ranges[0], inv_dynamics_range = block_diagonal_ranges[1]
+        dynamics_range = block_diagonal_ranges[0]
+        inv_dynamics_range = block_diagonal_ranges[1]
+
+        # Task 1: Perception - token immediately before dynamics_range
+        perception_idx = max(0, dynamics_range[0] - 1)
+        perception_hidden = alignment_out[:, perception_idx]  # [batch_size, hidden_dim]
         v_t_perception = self.perception_head(perception_hidden)
         perception_loss = F.mse_loss(v_t_perception, u_t_perception, reduction="none")
 
         # Task 2: Dynamics - pool over dynamics tokens
-        # Dynamics tokens: [1 : 1 + action_horizon + next_obs_seq_len]
-        # For simplicity, assume next_obs_features is a single vector (seq_len=1)
-        next_obs_seq_len = 1  # TODO: handle variable length
-        dynamics_start = 1
-        dynamics_end = 1 + action_horizon + next_obs_seq_len
-        dynamics_hidden = alignment_out[:, dynamics_start:dynamics_end].mean(dim=1)  # [batch_size, hidden_dim]
+        dynamics_hidden = alignment_out[:, dynamics_range[0]:dynamics_range[1]].mean(dim=1)  # [batch_size, hidden_dim]
         v_t_dynamics = self.dynamics_head(dynamics_hidden)
         dynamics_loss = F.mse_loss(v_t_dynamics, u_t_dynamics, reduction="none")
 
-        # Task 3: Inverse Dynamics - last action_horizon tokens
-        inv_dynamics_hidden = alignment_out[:, -action_horizon:]  # [batch_size, action_horizon, hidden_dim]
+        # Task 3: Inverse Dynamics - last block (next_obs_emb + noisy_actions)
+        inv_dynamics_hidden = alignment_out[:, inv_dynamics_range[0]:inv_dynamics_range[1]]
         v_t_inv_dynamics = self.inverse_dynamics_head(inv_dynamics_hidden)
         inverse_dynamics_loss = F.mse_loss(v_t_inv_dynamics, u_t_inv_dynamics, reduction="none")
 
@@ -748,28 +960,6 @@ class PI0Pytorch(nn.Module):
         }
 
         return action_loss, alignment_losses
-
-
-
-    def get_ttt_parameters(self):
-        """收集所有 TTT 层的可训练参数
-
-        Returns:
-            list: TTT 层的可训练参数列表
-        """
-        ttt_params = []
-        for name, param in self.named_parameters():
-            if 'ttt' in name.lower() and param.requires_grad:
-                ttt_params.append(param)
-                logging.debug(f"Found TTT parameter: {name}, shape: {param.shape}")
-
-        if len(ttt_params) == 0:
-            logging.warning("No TTT parameters found in the model. Check if use_ttt=True in config.")
-        else:
-            logging.info(f"Collected {len(ttt_params)} TTT parameters for alignment")
-
-        return ttt_params
-
     def update_online_buffer(self, observation, action):
         """更新 online buffer
 
@@ -800,11 +990,11 @@ class PI0Pytorch(nn.Module):
         return sampled_data
 
     def align(self, device):
-        """使用 buffer 中的数据优化 TTT 参数
+        """使用 buffer 中的数据优化 E-Token 参数
 
         执行在线对齐优化:
         1. 从 buffer 采样连续帧对 (obs_t, action_t, obs_t+1)
-        2. 只优化 TTT 参数(使用持久化的 optimizer)
+        2. 只优化 E-Token 参数(使用持久化的 optimizer)
         3. 使用 alignment expert 计算三个自监督任务的损失
 
         Args:
@@ -824,17 +1014,24 @@ class PI0Pytorch(nn.Module):
         if sampled_data is None:
             return None
 
-        # 3. 收集 TTT 参数并初始化 optimizer(如果还未初始化)
-        ttt_params = self.get_ttt_parameters()
-        if len(ttt_params) == 0:
-            logging.warning("No TTT parameters found, skipping align")
+        # 3. 收集需要对齐优化的参数（PEFT E-Token Bank）并初始化 optimizer(如果还未初始化)
+        update_peft_token = self.align_kwargs.get('update_peft_token', True)
+
+        params_to_opt = []
+        if update_peft_token and getattr(self, 'use_peft_prefix_token', False) and self.peft_prefix_token_bank is not None:
+            params_to_opt.append(self.peft_prefix_token_bank.weight)
+
+        if len(params_to_opt) == 0:
+            logging.warning("No E-Token Bank parameters available for alignment. Skipping align.")
             return None
 
         # 4. 初始化 optimizer(只在第一次调用时)
         if self.align_optimizer is None:
             learning_rate = self.align_kwargs.get('learning_rate', 1e-4)
-            self.align_optimizer = torch.optim.Adam(ttt_params, lr=learning_rate)
-            logging.info(f"Initialized align optimizer with lr={learning_rate} for {len(ttt_params)} TTT parameters")
+            self.align_optimizer = torch.optim.Adam(params_to_opt, lr=learning_rate)
+            logging.info(
+                f"Initialized align optimizer with lr={learning_rate} for E-Token parameters"
+            )
 
         # 5. 执行多步优化
         align_steps = self.align_kwargs.get('align_steps', 5)
@@ -974,7 +1171,7 @@ class PI0Pytorch(nn.Module):
                 if align_result is not None:
                     logging.info(f"Alignment result: {align_result}")
                 else:
-                    logging.info("Alignment skipped (buffer not ready or no TTT parameters)")
+                    logging.info("Alignment skipped (buffer not ready or no E-Token parameters)")
 
         return x_t
 
