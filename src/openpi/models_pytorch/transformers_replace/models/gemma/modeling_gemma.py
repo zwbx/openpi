@@ -333,7 +333,6 @@ class GemmaDecoderLayer(GradientCheckpointingLayer):
     def __init__(self, config: GemmaConfig, layer_idx: int):
         super().__init__()
         self.hidden_size = config.hidden_size
-        self.layer_idx = layer_idx
 
         self.self_attn = GemmaAttention(config=config, layer_idx=layer_idx)
 
@@ -341,45 +340,6 @@ class GemmaDecoderLayer(GradientCheckpointingLayer):
         cond_dim = getattr(config, 'adarms_cond_dim', None) if getattr(config, 'use_adarms', False) else None
         self.input_layernorm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps, cond_dim=cond_dim)
         self.post_attention_layernorm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps, cond_dim=cond_dim)
-
-        # TTT layer (if enabled) - now with integrated adaptive normalization
-        self.use_ttt = getattr(config, 'use_ttt', False)
-        if self.use_ttt:
-            ttt_positions = getattr(config, 'ttt_layer_positions', None)
-            # Support "all" string to apply TTT to all layers
-            if ttt_positions == "all" or ttt_positions is None:
-                should_use_ttt = True
-            else:
-                should_use_ttt = layer_idx in ttt_positions
-
-            if should_use_ttt:
-                # Import TTTWithAdaptiveNorm from our new module
-                import sys
-                import os
-                ttt_module_path = os.path.join(os.path.dirname(__file__), '../../../')
-                if ttt_module_path not in sys.path:
-                    sys.path.insert(0, ttt_module_path)
-                from .ttt_with_gate import TTTWithAdaptiveNorm
-
-                # Create TTT layer with integrated adaptive normalization
-                self.ttt_layer = TTTWithAdaptiveNorm(
-                    num_heads=config.num_attention_heads,
-                    hidden_size=config.hidden_size,
-                    mini_batch_size=getattr(config, 'ttt_mini_batch_size', 64),
-                    rope_theta=config.rope_theta,
-                    use_adarms=getattr(config, 'use_adarms', False),
-                    adarms_cond_dim=cond_dim,
-                    eps=config.rms_norm_eps,
-                    use_dual_form=getattr(config, 'use_dual_form', True),
-                    ttt_base_lr=getattr(config, 'ttt_base_lr', 1.0),
-                    keep_state=getattr(config, 'ttt_keep_state', False),
-                    track_loss=getattr(config, 'ttt_track_loss', True),
-                    layer_idx=layer_idx,  # Pass layer index for logging
-                )
-            else:
-                self.ttt_layer = None
-        else:
-            self.ttt_layer = None
 
     def forward(
         self,
@@ -394,12 +354,11 @@ class GemmaDecoderLayer(GradientCheckpointingLayer):
         adarms_cond: Optional[torch.Tensor] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[torch.FloatTensor, Optional[tuple[torch.FloatTensor, torch.FloatTensor]]]:
-        # ========== [1] Attention + TTT Block ==========
         residual = hidden_states
-        hidden_states, gate_attn = self.input_layernorm(hidden_states, adarms_cond)
+        hidden_states, gate = self.input_layernorm(hidden_states, adarms_cond)
 
         # Self Attention
-        attn_output, self_attn_weights = self.self_attn(
+        hidden_states, self_attn_weights = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -410,28 +369,13 @@ class GemmaDecoderLayer(GradientCheckpointingLayer):
             position_embeddings=position_embeddings,
             **kwargs,
         )
+        hidden_states = _gated_residual(residual, hidden_states, gate)
 
-        # Gated residual for attention
-        hidden_states = _gated_residual(residual, attn_output, gate_attn)
-
-        # TTT layer (if enabled) - now with integrated normalization and gate
-        if self.ttt_layer is not None:
-            # TTT forward with integrated normalization (returns output and gate)
-            # No position_ids needed - batch-parallel denoising across all tokens
-            ttt_output, gate_ttt = self.ttt_layer(attn_output, adarms_cond, cache_params=None)
-
-            # Add TTT branch (gated residual)
-            if gate_ttt is not None:
-                hidden_states = hidden_states + gate_ttt * ttt_output
-            else:
-                # If no gate (not using adarms), just add the output
-                hidden_states = hidden_states + ttt_output
-
-        # ========== [2] MLP Block ==========
+        # Fully Connected
         residual = hidden_states
-        hidden_states, gate_mlp = self.post_attention_layernorm(hidden_states, adarms_cond)
+        hidden_states, gate = self.post_attention_layernorm(hidden_states, adarms_cond)
         hidden_states = self.mlp(hidden_states)
-        hidden_states = _gated_residual(residual, hidden_states, gate_mlp)
+        hidden_states = _gated_residual(residual, hidden_states, gate)
 
         outputs = (hidden_states,)
         if output_attentions:
