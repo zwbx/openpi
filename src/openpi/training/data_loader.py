@@ -132,6 +132,7 @@ def create_torch_dataset(
 ) -> Dataset:
     """Create a dataset for training."""
     repo_id = data_config.repo_id
+    max_num_episodes = data_config.max_num_episodes
     if repo_id is None:
         raise ValueError("Repo ID is not set. Cannot create dataset.")
     if repo_id == "fake":
@@ -139,14 +140,28 @@ def create_torch_dataset(
 
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id, root=data_config.dataset_root)
     # Use only first 100 episodes for faster loading (LeRobot performance issue #93)
-    # episode_indices = list(range(100))
+    if max_num_episodes is not None:
+        episode_indices = list(range(max_num_episodes))
+    else:
+        episode_indices = None
+
+    # Configure delta_timestamps to load current and next frames for alignment expert
+    delta_timestamps = {
+        # Actions: future action_horizon steps (existing behavior)
+        **{key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys},
+    }
+
+    # Add next frame for all observation modalities (images + state)
+    # This loads 2 frames: [current (t=0), next (t=1/fps)]
+    for key in dataset_meta.features:
+        if key.startswith("observation."):
+            delta_timestamps[key] = [0, 1 / dataset_meta.fps]
+
     dataset = lerobot_dataset.LeRobotDataset(
         data_config.repo_id,
         root=data_config.dataset_root,
-        delta_timestamps={
-            key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
-        },
-        # episodes=episode_indices,
+        delta_timestamps=delta_timestamps,
+        episodes=episode_indices,
     )
 
     if data_config.prompt_from_task:
