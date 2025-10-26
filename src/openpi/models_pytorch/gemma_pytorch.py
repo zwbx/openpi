@@ -18,9 +18,6 @@ class PaliGemmaWithExpertModel(nn.Module):
         use_adarms=None,
         use_alignment_expert: bool = False,
         precision: Literal["bfloat16", "float32"] = "bfloat16",
-        use_ttt: bool = False,
-        ttt_layer_positions: list = None,
-        use_dual_form: bool = True,
     ):
         if use_adarms is None:
             use_adarms = [False, False, False]  # [VLM, Action Expert, Alignment Expert]
@@ -40,9 +37,6 @@ class PaliGemmaWithExpertModel(nn.Module):
         vlm_config_hf.text_config.vocab_size = 257152
         vlm_config_hf.text_config.use_adarms = use_adarms[0]
         vlm_config_hf.text_config.adarms_cond_dim = vlm_config.width if use_adarms[0] else None
-        # Explicitly disable TTT for VLM (only Action Expert should use TTT)
-        vlm_config_hf.text_config.use_ttt = False
-        vlm_config_hf.text_config.ttt_layer_positions = None
         vlm_config_hf.vision_config.intermediate_size = 4304
         vlm_config_hf.vision_config.projection_dim = 2048
         vlm_config_hf.vision_config.projector_hidden_act = "gelu_fast"
@@ -60,9 +54,6 @@ class PaliGemmaWithExpertModel(nn.Module):
             torch_dtype="float32",
             use_adarms=use_adarms[1],
             adarms_cond_dim=action_expert_config.width if use_adarms[1] else None,
-            use_ttt=use_ttt,
-            ttt_layer_positions=ttt_layer_positions,
-            use_dual_form=use_dual_form,
         )
 
         self.paligemma = PaliGemmaForConditionalGeneration(config=vlm_config_hf)
@@ -269,32 +260,13 @@ class PaliGemmaWithExpertModel(nn.Module):
                     layer = models[i].layers[layer_idx]
                     end_pos = start_pos + hidden_states.shape[1]
 
-                    # Step 1: O Projection (only call once)
-                    attn_out_slice = att_output[:, start_pos:end_pos]
                     if att_output.dtype != layer.self_attn.o_proj.weight.dtype:
-                        attn_out_slice = attn_out_slice.to(layer.self_attn.o_proj.weight.dtype)
-                    out_emb = layer.self_attn.o_proj(attn_out_slice)
+                        att_output = att_output.to(layer.self_attn.o_proj.weight.dtype)
+                    out_emb = layer.self_attn.o_proj(att_output[:, start_pos:end_pos])
 
-                    # Step 2: First Residual (attention branch)
+                    # first residual
                     out_emb = modeling_gemma._gated_residual(hidden_states, out_emb, gates[i])  # noqa: SLF001
                     after_first_residual = out_emb.clone()
-
-                    # Step 3: TTT Layer (if enabled) - after first residual
-                    if hasattr(layer, 'ttt_layer') and layer.ttt_layer is not None:
-                        # TTT uses the output after o_proj and first residual
-                        ttt_output, gate_ttt = layer.ttt_layer(out_emb, adarms_cond[i], cache_params=None)
-
-                        # Add TTT branch (gated residual)
-                        if gate_ttt is not None:
-                            out_emb = out_emb + gate_ttt * ttt_output
-                        else:
-                            # If no gate (not using adarms), just add the output
-                            out_emb = out_emb + ttt_output
-
-                        # Update after_first_residual to include TTT contribution
-                        after_first_residual = out_emb.clone()
-
-                    # Step 4: MLP Block
                     out_emb, gate = layer.post_attention_layernorm(out_emb, cond=adarms_cond[i])
                     # Convert to bfloat16 if the next layer (mlp) uses bfloat16
                     if layer.mlp.up_proj.weight.dtype == torch.bfloat16:
