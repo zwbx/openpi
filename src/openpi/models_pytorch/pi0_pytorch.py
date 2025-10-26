@@ -257,22 +257,13 @@ class PI0Pytorch(nn.Module):
         self.config = config
         self.pi05 = config.pi05
         # Convert AlignConfig to dict for PyTorch model
-        if hasattr(config, 'align_config'):
-            self.align_kwargs = dataclasses.asdict(config.align_config)
-        else:
-            # Fallback for backward compatibility
-            self.align_kwargs = {
-                'batch_size': 32,
-                'buffer_size': 20,
-                'lr': 1e-4,
-                'steps_each_interaction': 5,
-            }
+        self.align_kwargs = dataclasses.asdict(config.align_config)
 
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
 
+        use_alignment_expert = config.use_alignment_expert
         # Alignment expert config (lightweight, 2-4 layers)
-        use_alignment_expert = getattr(config, 'use_alignment_expert', False)
         if use_alignment_expert:
             alignment_expert_config = _gemma.get_config(config.alignment_expert_variant)
         else:
@@ -332,7 +323,7 @@ class PI0Pytorch(nn.Module):
             embodiment_path = getattr(config, 'embodiment_registry_path', None)
             if embodiment_path is not None:
                 self.embodiment_registry.load(embodiment_path)
-                logging.info(f"Loaded embodiment registry: {len(self.embodiment_registry)} embodiments")
+                logging.info(f"Loaded embodiment registry: {len(self.embodiment_registry)} embeddings")
         else:
             self.peft_prefix_token_bank = None
             self.embodiment_registry = None
@@ -881,12 +872,11 @@ class PI0Pytorch(nn.Module):
         # Apply gradient checkpointing if enabled
         def forward_func(prefix_embs, suffix_embs, alignment_suffix_embs, att_2d_masks_4d, position_ids, adarms_cond, alignment_adarms_cond):
             # Prepare inputs_embeds: [prefix, action_suffix, alignment_suffix (optional)]
-            if alignment_suffix_embs is not None:
-                inputs_embeds = [prefix_embs, suffix_embs, alignment_suffix_embs]
-                adarms_cond_list = [None, adarms_cond, alignment_adarms_cond]
-            else:
-                inputs_embeds = [prefix_embs, suffix_embs]
-                adarms_cond_list = [None, adarms_cond]
+            inputs_embeds = [prefix_embs, suffix_embs, alignment_suffix_embs]
+            adarms_cond_list = [None, adarms_cond, alignment_adarms_cond]
+
+
+            # import pdb; pdb.set_trace()
 
             outputs, _ = self.paligemma_with_expert.forward(
                 attention_mask=att_2d_masks_4d,
