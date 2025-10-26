@@ -65,6 +65,8 @@ class AssetsConfig:
 class DataConfig:
     # LeRobot repo id. If None, fake data will be created.
     repo_id: str | None = None
+    # Maximum number of episodes to load. If None, all episodes will be loaded.
+    max_num_episodes: int | None = None
     # Directory within the assets directory containing the data assets.
     asset_id: str | None = None
     # Root directory for local datasets. If None, will download from HuggingFace.
@@ -794,13 +796,20 @@ _CONFIGS = [
     TrainConfig(
         name="pi05_simpler_debug",
         # model=pi0_config.Pi0Config(pi05=True, discrete_state_input=True),
-        model=pi0_config.Pi0Config(paligemma_variant="dummy", action_expert_variant="dummy", alignment_expert_variant="dummy", discrete_state_input=True),
+        model=pi0_config.Pi0Config(
+            paligemma_variant="dummy",
+            action_expert_variant="dummy",
+            alignment_expert_variant="dummy",
+            use_alignment_expert=True,
+            discrete_state_input=True,
+        ),
         data=LeRobotSimplerDataConfig(
             repo_id="lerobot-pi0-bridge",
             base_config=DataConfig(
                 prompt_from_task=True,
                 dataset_root="/dev/shm/lerobot-pi0-bridge",
                 use_quantile_norm=True,
+                max_num_episodes=10,
             ),
         ),
         batch_size=2,
@@ -842,8 +851,7 @@ _CONFIGS = [
         model=pi0_config.Pi0Config(
             pi05=True,
             discrete_state_input=True,
-            use_align=True,
-            
+            use_alignment_expert=True,
         ),
         data=LeRobotSimplerDataConfig(
             repo_id="lerobot-pi0-bridge",
@@ -1108,7 +1116,7 @@ _CONFIGS = [
         name="debug",
         data=FakeDataConfig(),
         batch_size=2,
-        model=pi0_config.Pi0Config(paligemma_variant="dummy", action_expert_variant="dummy",alignment_expert_variant="dummy"),
+        model=pi0_config.Pi0Config(paligemma_variant="dummy", action_expert_variant="dummy",alignment_expert_variant="dummy", use_alignment_expert=True),
         save_interval=100,
         overwrite=True,
         exp_name="debug",
