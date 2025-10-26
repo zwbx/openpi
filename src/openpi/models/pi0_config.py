@@ -68,7 +68,8 @@ class Pi0Config(_model.BaseModelConfig):
     use_alignment_expert: bool = False
 
     # Online alignment configuration (will be converted to dict for PyTorch model)
-    align_config: AlignConfig = dataclasses.field(default_factory=AlignConfig) if use_alignment_expert else None
+    # Fix: default to None, then instantiate in __post_init__ when use_alignment_expert=True
+    align_config: AlignConfig | None = None
 
     # Attention restriction configuration
     # If True, image tokens cannot attend to language tokens (unidirectional: lang->image only)
@@ -78,6 +79,9 @@ class Pi0Config(_model.BaseModelConfig):
     def __post_init__(self):
         if self.max_token_len is None:
             object.__setattr__(self, "max_token_len", 200 if self.pi05 else 48)
+        # Instantiate AlignConfig lazily when alignment expert is enabled and not provided
+        if self.use_alignment_expert and self.align_config is None:
+            object.__setattr__(self, "align_config", AlignConfig())
         if self.discrete_state_input is None:
             object.__setattr__(self, "discrete_state_input", self.pi05)
 
