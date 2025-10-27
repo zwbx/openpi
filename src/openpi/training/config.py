@@ -812,7 +812,7 @@ _CONFIGS = [
                 max_num_episodes=10,
             ),
         ),
-        batch_size=2,
+        batch_size=3,
         save_interval=100,
         overwrite=True,
         exp_name="debug",

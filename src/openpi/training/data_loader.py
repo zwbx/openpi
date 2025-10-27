@@ -556,4 +556,37 @@ class DataLoaderImpl(DataLoader):
 
     def __iter__(self):
         for batch in self._data_loader:
-            yield _model.Observation.from_dict(batch), batch["actions"]
+            # Extract next_obs from temporal dimension if present
+            # After transforms, images have shape (batch, 2, H, W, C) and state has (batch, 2, state_dim)
+            next_obs_dict = {}
+
+            # Handle state: extract next frame (index 1)
+            if "state" in batch and len(batch["state"].shape) >= 2:
+                # Check if shape is (batch, time_or_state_dim, ...)
+                # If second dim is 2 and third dim exists, it's temporal
+                if batch["state"].shape[1] == 2 and len(batch["state"].shape) > 2:
+                    next_obs_dict["state"] = batch["state"][:, 1, :]  # (batch, state_dim)
+                    batch["state"] = batch["state"][:, 0, :]  # Keep current frame
+
+            # Handle images: extract next frame (index 1)
+            if "image" in batch:
+                next_obs_dict["image"] = {}
+                for key in list(batch["image"].keys()):
+                    img = batch["image"][key]
+                    # After resize: (batch, 2, H, W, C)
+                    if len(img.shape) == 5 and img.shape[1] == 2:
+                        # Extract next frame for next_obs
+                        next_obs_dict["image"][key] = img[:, 1, ...]  # (batch, H, W, C)
+                        # Extract current frame for current obs
+                        batch["image"][key] = img[:, 0, ...]  # (batch, H, W, C)
+
+            # Create next_obs Observation object if we have next frame data
+            next_obs = None
+            if next_obs_dict:
+                # Copy over other keys that don't have temporal dimension
+                for key in batch:
+                    if key not in next_obs_dict and key not in ["actions", "image", "state"]:
+                        next_obs_dict[key] = batch[key]
+                next_obs = _model.Observation.from_dict(next_obs_dict)
+
+            yield _model.Observation.from_dict(batch), batch["actions"], next_obs
