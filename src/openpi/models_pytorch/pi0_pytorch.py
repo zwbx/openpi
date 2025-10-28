@@ -294,8 +294,8 @@ class PI0Pytorch(nn.Module):
         self.state_in_proj = nn.Linear(32, alignment_expert_config.width)
         self.state_out_proj = nn.Linear(alignment_expert_config.width, 32)
 
-        self.image_feat_in_proj = nn.Linear(64, alignment_expert_config.width)
-        self.image_feat_out_proj = nn.Linear(alignment_expert_config.width, 64)
+        self.image_feat_in_proj = nn.Linear(2048, alignment_expert_config.width)
+        self.image_feat_out_proj = nn.Linear(alignment_expert_config.width, 2048)
 
         # PEFT prefix token bank (E-Token Bank) using nn.Embedding
         self.use_peft_prefix_token = bool(getattr(config, 'use_peft_prefix_token', False))
@@ -739,6 +739,7 @@ class PI0Pytorch(nn.Module):
         embs = torch.cat(embs, dim=1)
         pad_masks = torch.cat(pad_masks, dim=1)
         att_masks = torch.tensor(att_masks, dtype=embs.dtype, device=embs.device)
+        att_masks = att_masks[None, :].expand(bsize, len(att_masks))
 
         # HACK: Manually set block diagonal ranges
         # Perception: 1 token (0:1), Dynamics: 257 tokens (1:258), Inverse Dynamics: 257 tokens (258:515)
