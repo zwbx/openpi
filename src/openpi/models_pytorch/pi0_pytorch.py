@@ -949,17 +949,28 @@ class PI0Pytorch(nn.Module):
         # Task 1: Perception - single token at perception_range
         perception_idx = perception_range[0]  # Index 0
         perception_hidden = alignment_out[:, perception_idx]  # [batch_size, hidden_dim]
-        v_t_perception = self.perception_head(perception_hidden)
+        v_t_perception = self._apply_checkpoint(self.state_out_proj, perception_hidden)
         perception_loss = F.mse_loss(v_t_perception, u_t_perception, reduction="none")
 
-        # Task 2: Dynamics - pool over dynamics tokens
-        dynamics_hidden = alignment_out[:, dynamics_range[0]:dynamics_range[1]].mean(dim=1)  # [batch_size, hidden_dim]
-        v_t_dynamics = self.dynamics_head(dynamics_hidden)
-        dynamics_loss = F.mse_loss(v_t_dynamics, u_t_dynamics, reduction="none")
+        # Task 2: Dynamics - predict image features from action + noisy_next_obs
+        # Dynamics range: (1, 258) = action(1 token) + noisy_next_obs(256 tokens)
+        # We want to predict the 256 image tokens, skip the action token
+        dynamics_image_start = dynamics_range[0] + 1  # Skip action token, start from index 2
+        dynamics_image_hidden = alignment_out[:, dynamics_image_start:dynamics_range[1]]  # [batch, 256, hidden_dim]
 
-        # Task 3: Inverse Dynamics - last block (next_obs_emb + noisy_actions)
-        inv_dynamics_hidden = alignment_out[:, inv_dynamics_range[0]:inv_dynamics_range[1]]
-        v_t_inv_dynamics = self.inverse_dynamics_head(inv_dynamics_hidden)
+        # Apply dynamics head to each image token
+        v_t_dynamics_tokens = self._apply_checkpoint(self.image_feat_out_proj, dynamics_image_hidden)  # [batch, 256, hidden_dim]
+
+        # u_t_dynamics is [batch, 256, width], need to match dimensions
+        dynamics_loss = F.mse_loss(v_t_dynamics_tokens, u_t_dynamics, reduction="none")
+
+        # Task 3: Inverse Dynamics - predict action from next_obs + noisy_action
+        # Inv_dynamics range: (258, 515) = next_obs(256 tokens) + noisy_action(1 token)
+        # We want to predict the action, so use the last token (noisy_action position)
+        inv_dynamics_action_idx = inv_dynamics_range[1] - 1  # Last token (index 514)
+        inv_dynamics_action_hidden = alignment_out[:, inv_dynamics_action_idx]  # [batch, hidden_dim]
+
+        v_t_inv_dynamics = self._apply_checkpoint(self.action_out_proj, inv_dynamics_action_hidden)  # [batch, action_dim]
         inverse_dynamics_loss = F.mse_loss(v_t_inv_dynamics, u_t_inv_dynamics, reduction="none")
 
         # Return both action loss and alignment losses
