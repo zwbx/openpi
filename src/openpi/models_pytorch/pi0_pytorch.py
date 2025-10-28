@@ -294,8 +294,8 @@ class PI0Pytorch(nn.Module):
         self.state_in_proj = nn.Linear(32, alignment_expert_config.width)
         self.state_out_proj = nn.Linear(alignment_expert_config.width, 32)
 
-        self.image_feat_in_proj = nn.Linear(2048, alignment_expert_config.width)
-        self.image_feat_out_proj = nn.Linear(alignment_expert_config.width, 2048)
+        self.image_feat_in_proj = nn.Linear(self.width, alignment_expert_config.width)
+        self.image_feat_out_proj = nn.Linear(alignment_expert_config.width, self.width)
 
         # PEFT prefix token bank (E-Token Bank) using nn.Embedding
         self.use_peft_prefix_token = bool(getattr(config, 'use_peft_prefix_token', False))
@@ -872,11 +872,26 @@ class PI0Pytorch(nn.Module):
             att_masks = torch.cat([prefix_att_masks, suffix_att_masks, alignment_att_masks], dim=1)
 
             # Adjust block_diagonal_ranges to account for prefix + action suffix offset
-            prefix_suffix_len = prefix_pad_masks.shape[1] + suffix_pad_masks.shape[1]
-            adjusted_block_diagonal_ranges = [
+            prefix_len = prefix_pad_masks.shape[1]
+            suffix_len = suffix_pad_masks.shape[1]
+            prefix_suffix_len = prefix_len + suffix_len
+
+            # Alignment expert blocks (after offsetting by prefix + action suffix)
+            adjusted_alignment_block_ranges = [
                 (start + prefix_suffix_len, end + prefix_suffix_len)
                 for start, end in block_diagonal_ranges
             ]
+
+            # Add Action Suffix as a separate block that alignment expert cannot attend to
+            # Block structure:
+            # - Prefix: [0, prefix_len)
+            # - Action Suffix: [prefix_len, prefix_suffix_len)  <- isolated from alignment
+            # - Alignment Task 1: adjusted_alignment_block_ranges[0]
+            # - Alignment Task 2: adjusted_alignment_block_ranges[1]
+            # - Alignment Task 3: adjusted_alignment_block_ranges[2]
+
+            # Final block_diagonal_ranges: [Action Suffix, Align Task 1, Align Task 2, Align Task 3]
+            adjusted_block_diagonal_ranges = [(prefix_len, prefix_suffix_len)] + adjusted_alignment_block_ranges
 
             att_2d_masks = make_att_2d_masks(pad_masks, att_masks, block_diagonal_ranges=adjusted_block_diagonal_ranges)
         else:

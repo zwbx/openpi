@@ -148,18 +148,18 @@ class PaliGemmaWithExpertModel(nn.Module):
             suffix_output = suffix_output.last_hidden_state
             prefix_output = None
             prefix_past_key_values = None
-        elif inputs_embeds[0] is not None and inputs_embeds[2] is not None: # for alignment expert
-            suffix_output = self.alignment_expert.model.forward(
-                inputs_embeds=inputs_embeds[2],
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                past_key_values=past_key_values,
-                use_cache=use_cache,
-                adarms_cond=adarms_cond[2] if adarms_cond is not None else None,
-            )
-            suffix_output = suffix_output.last_hidden_state
-            prefix_output = None
-            prefix_past_key_values = None
+        # elif inputs_embeds[0] is not None and inputs_embeds[2] is not None: # for alignment expert
+        #     suffix_output = self.alignment_expert.model.forward(
+        #         inputs_embeds=inputs_embeds[2],
+        #         attention_mask=attention_mask,
+        #         position_ids=position_ids,
+        #         past_key_values=past_key_values,
+        #         use_cache=use_cache,
+        #         adarms_cond=adarms_cond[2] if adarms_cond is not None else None,
+        #     )
+        #     suffix_output = suffix_output.last_hidden_state
+        #     prefix_output = None
+        #     prefix_past_key_values = None
         else: # for training (joint attention for all experts)
             # Build models list: VLM + Action Expert + (optional) Alignment Expert
             models = [self.paligemma.language_model, self.gemma_expert.model]
