@@ -160,6 +160,11 @@ def preprocess_observation_pytorch(
         else:
             out_masks[key] = observation.image_masks[key]
 
+    # Ensure state is float32 to avoid unintended float64 promotion downstream
+    state = observation.state
+    if isinstance(state, torch.Tensor) and state.dtype != torch.float32:
+        state = state.to(torch.float32)
+
     # Create a simple object with the required attributes instead of using the complex Observation class
     class SimpleProcessedObservation:
         def __init__(self, **kwargs):
@@ -169,7 +174,7 @@ def preprocess_observation_pytorch(
     return SimpleProcessedObservation(
         images=out_images,
         image_masks=out_masks,
-        state=observation.state,
+        state=state,
         tokenized_prompt=observation.tokenized_prompt,
         tokenized_prompt_mask=observation.tokenized_prompt_mask,
         token_ar_mask=observation.token_ar_mask,
