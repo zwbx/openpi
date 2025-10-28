@@ -159,7 +159,8 @@ def preprocess_observation_pytorch(
             out_masks[key] = torch.ones(batch_shape, dtype=torch.bool, device=observation.state.device)
         else:
             out_masks[key] = observation.image_masks[key]
-
+    
+    # HACK
     # Ensure state is float32 to avoid unintended float64 promotion downstream
     state = observation.state
     if isinstance(state, torch.Tensor) and state.dtype != torch.float32:
