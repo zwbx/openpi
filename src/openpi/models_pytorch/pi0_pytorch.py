@@ -260,6 +260,7 @@ class PI0Pytorch(nn.Module):
         self.align_kwargs = dataclasses.asdict(config.align_config)
 
         paligemma_config = _gemma.get_config(config.paligemma_variant)
+        self.width = paligemma_config.width
         action_expert_config = _gemma.get_config(config.action_expert_variant)
 
         use_alignment_expert = config.use_alignment_expert
@@ -289,6 +290,12 @@ class PI0Pytorch(nn.Module):
 
         self.action_in_proj = nn.Linear(32, action_expert_config.width)
         self.action_out_proj = nn.Linear(action_expert_config.width, 32)
+
+        self.state_in_proj = nn.Linear(32, alignment_expert_config.width)
+        self.state_out_proj = nn.Linear(alignment_expert_config.width, 32)
+
+        self.image_feat_in_proj = nn.Linear(64, alignment_expert_config.width)
+        self.image_feat_out_proj = nn.Linear(alignment_expert_config.width, 64)
 
         # PEFT prefix token bank (E-Token Bank) using nn.Embedding
         self.use_peft_prefix_token = bool(getattr(config, 'use_peft_prefix_token', False))
@@ -343,6 +350,9 @@ class PI0Pytorch(nn.Module):
         if self.pi05:
             self.time_mlp_in = nn.Linear(action_expert_config.width, action_expert_config.width)
             self.time_mlp_out = nn.Linear(action_expert_config.width, action_expert_config.width)
+            if use_alignment_expert:
+                self.time_mlp_in_alignment = nn.Linear(action_expert_config.width, action_expert_config.width)
+                self.time_mlp_out_alignment = nn.Linear(action_expert_config.width, action_expert_config.width)
         else:
             self.state_proj = nn.Linear(32, action_expert_config.width)
             self.action_time_mlp_in = nn.Linear(2 * action_expert_config.width, action_expert_config.width)
@@ -516,6 +526,21 @@ class PI0Pytorch(nn.Module):
         embs.append(lang_emb)
         pad_masks.append(lang_masks)
 
+        #  full attention between image and language inputs
+        # This is legacy for compatibility with previous versions
+        # where we used to have a full attention between image and language tokens
+
+        # num_lang_embs = lang_emb.shape[1]
+        # att_masks += [0] * num_lang_embs
+
+        # embs = torch.cat(embs, dim=1)
+        # pad_masks = torch.cat(pad_masks, dim=1)
+        # att_masks = torch.tensor(att_masks, dtype=torch.bool, device=pad_masks.device)
+
+        # # Get batch size from the first dimension of the concatenated tensors
+        # bsize = pad_masks.shape[0]
+        # att_masks = att_masks[None, :].expand(bsize, len(att_masks))
+
         # Attention between image and language inputs
         # If restrict_image_to_language=True, image tokens cannot attend to language tokens
         # (unidirectional: language -> image only)
@@ -523,7 +548,7 @@ class PI0Pytorch(nn.Module):
         if getattr(self.config, 'restrict_image_to_language', False):
             # Set language tokens as a new attention block (att_mask=1)
             # This prevents image tokens from attending to language tokens
-            att_masks += [1] * num_lang_embs
+            att_masks += [1] + ([0] * (num_lang_embs - 1))
         else:
             # Default: full attention between image and language inputs
             att_masks += [0] * num_lang_embs
@@ -583,6 +608,7 @@ class PI0Pytorch(nn.Module):
 
         action_emb = self._apply_checkpoint(action_proj_func, noisy_actions)
 
+        assert self.pi05, "only supports Pi05"
         if not self.pi05:
             time_emb = time_emb[:, None, :].expand_as(action_emb)
             action_time_emb = torch.cat([action_emb, time_emb], dim=2)
@@ -607,12 +633,12 @@ class PI0Pytorch(nn.Module):
             action_time_emb = action_emb
             adarms_cond = time_emb
 
-        # Optionally prepend PEFT E-Token from Token Bank
-        if self.use_peft_prefix_token and self.peft_prefix_token_bank is not None:
-            bsize = action_time_emb.shape[0]
-            e_tok = self.get_embodiment_token(embodiment_keys, bsize)
-            if e_tok is not None:
-                action_time_emb = torch.cat([e_tok, action_time_emb], dim=1)
+        # # Optionally prepend PEFT E-Token from Token Bank
+        # if self.use_peft_prefix_token and self.peft_prefix_token_bank is not None:
+        #     bsize = action_time_emb.shape[0]
+        #     e_tok = self.get_embodiment_token(embodiment_keys, bsize)
+        #     if e_tok is not None:
+        #         action_time_emb = torch.cat([e_tok, action_time_emb], dim=1)
 
         # Add to input tokens
         embs.append(action_time_emb)
@@ -633,7 +659,7 @@ class PI0Pytorch(nn.Module):
         return embs, pad_masks, att_masks, adarms_cond
 
     def embed_alignment_suffix(self, noisy_state, actions, noisy_next_obs_features,
-                               next_obs_embedding, noisy_actions, timestep, embodiment_keys=None):
+                               next_obs_features, noisy_actions, timestep, embodiment_keys=None):
         """Embed alignment expert inputs for three self-supervised tasks.
 
         Tasks:
@@ -662,12 +688,12 @@ class PI0Pytorch(nn.Module):
         action_horizon = self.config.action_horizon
 
         # Optionally prepend PEFT E-Token from Token Bank to alignment suffix
-        if self.use_peft_prefix_token and self.peft_prefix_token_bank is not None:
-            e_tok = self.get_embodiment_token(embodiment_keys, bsize)
-            if e_tok is not None:
-                embs.append(e_tok)
-                pad_masks.append(torch.ones(bsize, e_tok.shape[1], dtype=torch.bool, device=device))
-                att_masks += [1] + ([0] * (e_tok.shape[1] - 1))
+        # if self.use_peft_prefix_token and self.peft_prefix_token_bank is not None:
+        #     e_tok = self.get_embodiment_token(embodiment_keys, bsize)
+        #     if e_tok is not None:
+        #         embs.append(e_tok)
+        #         pad_masks.append(torch.ones(bsize, e_tok.shape[1], dtype=torch.bool, device=device))
+        #         att_masksl += [1] + ([0] * (e_tok.shape[1] - 1))
 
         # Process timestep for adaRMS
         time_emb = create_sinusoidal_pos_embedding(
@@ -676,71 +702,47 @@ class PI0Pytorch(nn.Module):
         time_emb = time_emb.type(dtype=timestep.dtype)
 
         def time_mlp_func(time_emb):
-            x = self.time_mlp_in(time_emb)
+            x = self.time_mlp_in_alignment(time_emb)
             x = F.silu(x)
-            x = self.time_mlp_out(x)
+            x = self.time_mlp_out_alignment(x)
             return F.silu(x)
 
         adarms_cond = self._apply_checkpoint(time_mlp_func, time_emb)
 
         # Task 1: Perception - embed noisy_state
-        if self.state_proj.weight.dtype == torch.float32:
-            noisy_state = noisy_state.to(torch.float32)
-
-        state_emb = self._apply_checkpoint(self.state_proj, noisy_state)
-        embs.append(state_emb[:, None, :])
+        emb_noisy_state = self._apply_checkpoint(self.state_in_proj, noisy_state)
+        embs.append(emb_noisy_state[:, None, :])
         pad_masks.append(torch.ones(bsize, 1, dtype=torch.bool, device=device))
         att_masks += [1]  # Perception starts new block
 
-        # Track running position to compute block ranges
-        dynamics_start = sum(m.shape[1] for m in pad_masks)
-
-        # Task 2: Dynamics - embed actions + noisy_next_obs
-        action_emb = self._apply_checkpoint(self.action_in_proj, actions)
-        embs.append(action_emb)
-        pad_masks.append(torch.ones(bsize, action_horizon, dtype=torch.bool, device=device))
-        att_masks += [1] + ([0] * (action_horizon - 1))
-
-        if noisy_next_obs_features.ndim == 2:
-            noisy_next_obs_features = noisy_next_obs_features.unsqueeze(1)
-
-        def proj_features(features):
-            batch_size, seq_len, feat_dim = features.shape
-            return self.state_proj(features.reshape(-1, feat_dim)).reshape(batch_size, seq_len, -1)
-
-        next_obs_emb = self._apply_checkpoint(proj_features, noisy_next_obs_features)
-        embs.append(next_obs_emb)
-        next_obs_seq_len = next_obs_emb.shape[1]
-        pad_masks.append(torch.ones(bsize, next_obs_seq_len, dtype=torch.bool, device=device))
-        att_masks += [0] * next_obs_seq_len
-
-        dynamics_end = sum(m.shape[1] for m in pad_masks)
+        # Task 2: Dynamics - embed actions + noisy_next_obs_features (&next_state)
+        emb_actions = self._apply_checkpoint(self.action_in_proj, actions)[:, None, :]
+        emb_next_obs = self._apply_checkpoint(self.image_feat_in_proj, noisy_next_obs_features)
+        # emb_state = self._apply_checkpoint(self.action_in_proj, sta)
+        embs.append(emb_actions)
+        embs.append(emb_next_obs)
+        pad_masks.append(torch.ones(bsize, 1, dtype=torch.bool, device=device))  # action: 1 token
+        pad_masks.append(torch.ones(bsize, 256, dtype=torch.bool, device=device))  # next_obs: 256 tokens
+        att_masks += [1] + ([0] * 256)  # Dynamics starts new block (1 action + 256 image tokens)
 
         # Task 3: Inverse Dynamics - embed next_obs + noisy_actions
-        if next_obs_embedding.ndim == 2:
-            next_obs_embedding = next_obs_embedding.unsqueeze(1)
-
-        next_obs_emb_inv = self._apply_checkpoint(proj_features, next_obs_embedding)
-        embs.append(next_obs_emb_inv)
-        next_obs_inv_len = next_obs_emb_inv.shape[1]
-        pad_masks.append(torch.ones(bsize, next_obs_inv_len, dtype=torch.bool, device=device))
-        att_masks += [1] + ([0] * (next_obs_inv_len - 1))
-
-        noisy_action_emb = self._apply_checkpoint(self.action_in_proj, noisy_actions)
-        embs.append(noisy_action_emb)
-        pad_masks.append(torch.ones(bsize, action_horizon, dtype=torch.bool, device=device))
-        att_masks += [0] * action_horizon
-
-        # Block diagonal: Dynamics and Inverse Dynamics cannot see each other
-        inverse_dynamics_start = dynamics_end
-        inverse_dynamics_end = inverse_dynamics_start + next_obs_inv_len + action_horizon
-        block_diagonal_ranges = [(dynamics_start, dynamics_end), (inverse_dynamics_start, inverse_dynamics_end)]
+        next_obs_features = next_obs_features.float()
+        emb_next_obs_features = self._apply_checkpoint(self.image_feat_in_proj, next_obs_features)
+        emb_noisy_actions = self._apply_checkpoint(self.action_in_proj, noisy_actions)[:, None, :]
+        embs.append(emb_next_obs_features)
+        embs.append(emb_noisy_actions)
+        pad_masks.append(torch.ones(bsize, 256, dtype=torch.bool, device=device))  # next_obs: 256 tokens
+        pad_masks.append(torch.ones(bsize, 1, dtype=torch.bool, device=device))  # noisy_actions: 1 token
+        att_masks += [1] + ([0] * 256)  # Inverse Dynamics starts new block (256 image tokens + 1 action)
 
         # Concatenate
         embs = torch.cat(embs, dim=1)
         pad_masks = torch.cat(pad_masks, dim=1)
         att_masks = torch.tensor(att_masks, dtype=embs.dtype, device=embs.device)
-        att_masks = att_masks[None, :].expand(bsize, len(att_masks))
+
+        # HACK: Manually set block diagonal ranges
+        # Perception: 1 token (0:1), Dynamics: 257 tokens (1:258), Inverse Dynamics: 257 tokens (258:515)
+        block_diagonal_ranges = [(0, 1), (1, 258), (258, 515)]
 
         return embs, pad_masks, att_masks, adarms_cond, block_diagonal_ranges
 
@@ -790,22 +792,31 @@ class PI0Pytorch(nn.Module):
 
         # Alignment Expert: prepare diffusion inputs for three tasks
         if use_alignment_expert and next_obs is not None:
+            images_next, img_masks_next, lang_tokens_next, lang_masks_next, state_next = self._preprocess_observation(next_obs, train=True)
             time_expanded_state = time[:, None]  # [batch_size, 1]
+            time_expanded_iamge_feat = time[:, None, None]  # [batch_size, 1, 1]
+            time_expanded_action = time[:, None]  # [batch_size, 1]
+            batch = len(time)
 
             # Task 1: Perception (noisy_state -> state)
-            noise_perception = self.sample_noise(state.shape, state.device)
+            noise_perception = self.sample_noise((batch, state.shape[-1]), actions.device)
             state_t = time_expanded_state * noise_perception + (1 - time_expanded_state) * state
             u_t_perception = noise_perception - state
 
             # Task 2: Dynamics (action + noisy_next_obs -> next_obs)
-            noise_dynamics = self.sample_noise(next_obs.shape, next_obs.device)
-            next_obs_t = time_expanded_state * noise_dynamics + (1 - time_expanded_state) * next_obs
-            u_t_dynamics = noise_dynamics - next_obs
+            # TODO compatiblity with diffrent camera view
+            image_feat = self.paligemma_with_expert.embed_image(images_next[0])
+            noise_dynamics = self.sample_noise((batch, 256, self.width), actions.device)
+            
+            next_obs_t = time_expanded_iamge_feat * noise_dynamics + (1 - time_expanded_iamge_feat) * image_feat
+            u_t_dynamics = noise_dynamics - image_feat
 
             # Task 3: Inverse Dynamics (next_obs + noisy_action -> action)
-            noise_inv_dynamics = self.sample_noise(actions.shape, actions.device)
-            actions_t_inv = time_expanded * noise_inv_dynamics + (1 - time_expanded) * actions
-            u_t_inv_dynamics = noise_inv_dynamics - actions
+            action_one_step = actions[:, 0, :]
+            # TODO compatiblity with diffrent exucution strategy
+            noise_inv_dynamics = self.sample_noise((batch, action_one_step.shape[-1]), actions.device)
+            actions_t_inv = time_expanded_action * noise_inv_dynamics + (1 - time_expanded_action) * action_one_step
+            u_t_inv_dynamics = noise_inv_dynamics - action_one_step
         else:
             state_t = None
             next_obs_t = None
@@ -825,9 +836,9 @@ class PI0Pytorch(nn.Module):
             alignment_suffix_embs, alignment_pad_masks, alignment_att_masks, alignment_adarms_cond, block_diagonal_ranges = \
                 self.embed_alignment_suffix(
                     noisy_state=state_t,
-                    actions=actions,  # clean actions for dynamics task
+                    actions=action_one_step,  # clean actions for dynamics task
                     noisy_next_obs_features=next_obs_t,
-                    next_obs_embedding=next_obs,  # clean next_obs for inverse dynamics task
+                    next_obs_features=image_feat,  # clean next_obs for inverse dynamics task
                     noisy_actions=actions_t_inv,
                     timestep=time,
                     embodiment_keys=embodiment_keys,
@@ -836,6 +847,14 @@ class PI0Pytorch(nn.Module):
             alignment_suffix_embs = None
             alignment_adarms_cond = None
             block_diagonal_ranges = None
+
+        # add prefix embodiment token
+        if self.use_peft_prefix_token:
+            batch_size = actions.shape[0]
+            e_tok = self.get_embodiment_token(embodiment_keys, batch_size)
+            prefix_embs = torch.cat([prefix_embs,e_tok], dim=1)
+            prefix_pad_masks = torch.cat([prefix_pad_masks, torch.ones(batch_size, e_tok.shape[1], dtype=torch.bool, device=actions.device)], dim=1)
+            prefix_att_masks = torch.cat([prefix_att_masks, torch.ones(batch_size, e_tok.shape[1], dtype=torch.bool, device=actions.device)], dim=1)
 
         if (
             self.paligemma_with_expert.paligemma.language_model.layers[0].self_attn.q_proj.weight.dtype
@@ -922,12 +941,13 @@ class PI0Pytorch(nn.Module):
         action_horizon = self.config.action_horizon
 
         # Derive ranges from block_diagonal_ranges returned by embed_alignment_suffix
-        # dynamics_range = block_diagonal_ranges[0], inv_dynamics_range = block_diagonal_ranges[1]
-        dynamics_range = block_diagonal_ranges[0]
-        inv_dynamics_range = block_diagonal_ranges[1]
+        # block_diagonal_ranges: [(0,1) Perception, (1,258) Dynamics, (258,515) Inv_Dynamics]
+        perception_range = block_diagonal_ranges[0]
+        dynamics_range = block_diagonal_ranges[1]
+        inv_dynamics_range = block_diagonal_ranges[2]
 
-        # Task 1: Perception - token immediately before dynamics_range
-        perception_idx = max(0, dynamics_range[0] - 1)
+        # Task 1: Perception - single token at perception_range
+        perception_idx = perception_range[0]  # Index 0
         perception_hidden = alignment_out[:, perception_idx]  # [batch_size, hidden_dim]
         v_t_perception = self.perception_head(perception_hidden)
         perception_loss = F.mse_loss(v_t_perception, u_t_perception, reduction="none")
