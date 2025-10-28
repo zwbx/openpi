@@ -66,10 +66,17 @@ class Pi0Config(_model.BaseModelConfig):
 
     # Online Align Layer configuration (for online adaptation during inference)
     use_alignment_expert: bool = False
-
     # Online alignment configuration (will be converted to dict for PyTorch model)
     # Fix: default to None, then instantiate in __post_init__ when use_alignment_expert=True
     align_config: AlignConfig | None = None
+
+    # use use_peft_prefix_token and peft_num_tokens
+    use_peft_prefix_token: bool = False
+    peft_num_tokens: int = 1  # Number of tokens per embodiment
+    peft_token_bank_size: int = 1024  # Maximum number of embodiments (can be dynamically expanded)
+    peft_init: str = "zeros"  # "zeros" | "normal"
+
+
 
     # Attention restriction configuration
     # If True, image tokens cannot attend to language tokens (unidirectional: lang->image only)
