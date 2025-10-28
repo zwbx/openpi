@@ -801,7 +801,11 @@ _CONFIGS = [
             action_expert_variant="dummy",
             alignment_expert_variant="dummy",
             use_alignment_expert=True,
+            use_peft_prefix_token=True,
+            peft_token_bank_size=32,
+            restrict_image_to_language=True,
             discrete_state_input=True,
+            pi05=True
         ),
         data=LeRobotSimplerDataConfig(
             repo_id="lerobot-pi0-bridge",
