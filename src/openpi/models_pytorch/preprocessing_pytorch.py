@@ -21,9 +21,17 @@ def preprocess_observation_pytorch(
     observation,
     *,
     train: bool = False,
+    aug_config: dict | None = None,
     image_keys: Sequence[str] = IMAGE_KEYS,
     image_resolution: tuple[int, int] = IMAGE_RESOLUTION,
 ):
+    # Set default aug_config if training mode but no config provided
+    if train and aug_config is None:
+        aug_config = {
+            'crop': 1.0,      # No crop by default
+            'rotation': 0,    # No rotation by default
+            'flip': 0,        # No flip by default
+        }
     """Torch.compile-compatible version of preprocess_observation_pytorch with simplified type annotations.
 
     This function avoids complex type annotations that can cause torch.compile issues.
@@ -38,6 +46,20 @@ def preprocess_observation_pytorch(
     batch_shape = observation.state.shape[:-1]
 
     out_images = {}
+
+    
+    # # Track augmentation application and discretized buckets
+    # augmentation_flags = {
+    #     # "brightness": False,
+    #     # "contrast": False,
+    #     # "saturation": False,
+    #     # Discretized bins
+    #     "crop_bin": "c00",
+    #     "rotation_bin": "r00",
+    #     "flip_bin": "f0",
+    # }
+
+
     for key in image_keys:
         image = observation.images[key]
 
@@ -63,16 +85,16 @@ def preprocess_observation_pytorch(
                 height, width = image.shape[1:3]
 
                 # Random crop and resize
-                crop_height = int(height * 0.95)
-                crop_width = int(width * 0.95)
+                crop_height = int(height * aug_config['crop'])
+                crop_width = int(width * aug_config['crop'])
 
                 # Random crop
                 max_h = height - crop_height
                 max_w = width - crop_width
                 if max_h > 0 and max_w > 0:
-                    # Use tensor operations instead of .item() for torch.compile compatibility
-                    start_h = torch.randint(0, max_h + 1, (1,), device=image.device)
-                    start_w = torch.randint(0, max_w + 1, (1,), device=image.device)
+                    # Use .item() to convert tensor to int for slicing
+                    start_h = torch.randint(0, max_h + 1, (1,), device=image.device).item()
+                    start_w = torch.randint(0, max_w + 1, (1,), device=image.device).item()
                     image = image[:, start_h : start_h + crop_height, start_w : start_w + crop_width, :]
 
                 # Resize back to original size
@@ -83,12 +105,17 @@ def preprocess_observation_pytorch(
                     align_corners=False,
                 ).permute(0, 2, 3, 1)  # [b, c, h, w] -> [b, h, w, c]
 
+                # Random horizontal flip (p=0.5)
+                if aug_config['flip']:
+                    image = torch.flip(image, dims=(2,))  # flip width dimension
+
                 # Random rotation (small angles)
-                # Use tensor operations instead of .item() for torch.compile compatibility
-                angle = torch.rand(1, device=image.device) * 10 - 5  # Random angle between -5 and 5 degrees
-                if torch.abs(angle) > 0.1:  # Only rotate if angle is significant
-                    # Convert to radians
-                    angle_rad = angle * torch.pi / 180.0
+                # Convert angle to torch tensor for consistent operations
+                angle = float(aug_config['rotation'])  # Ensure it's a Python float
+                if abs(angle) > 0.1:  # Only rotate if angle is significant
+                    # Convert to torch tensor and then to radians
+                    angle_tensor = torch.tensor(angle, device=image.device, dtype=torch.float32)
+                    angle_rad = angle_tensor * torch.pi / 180.0
 
                     # Create rotation matrix
                     cos_a = torch.cos(angle_rad)
