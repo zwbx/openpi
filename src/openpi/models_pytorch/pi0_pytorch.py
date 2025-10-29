@@ -2,6 +2,8 @@ import logging
 import math
 import dataclasses
 
+import typing
+from typing import Tuple
 import torch
 from torch import Tensor
 from torch import nn
@@ -10,80 +12,16 @@ import torch.nn.functional as F  # noqa: N812
 import openpi.models.gemma as _gemma
 from openpi.models_pytorch.gemma_pytorch import PaliGemmaWithExpertModel
 import openpi.models_pytorch.preprocessing_pytorch as _preprocessing
-from openpi.shared.embodiment_config import EmbodimentRegistry, EmbodimentConfig, EmbodimentKey
+from openpi.shared.embodiment_config import EmbodimentRegistry, BaseEmbodimentConfig, EmbodimentKey
 import random
 import time
+import numpy
 
 
 # ============================================================================
 # TEMPORARY: Random Embodiment Keys Generator (for development)
 # TODO: Remove this when data loader provides real embodiment_keys
 # ============================================================================
-
-def _generate_random_embodiment_key(seed: int | None = None) -> EmbodimentKey:
-    """
-    临时函数：生成随机的 EmbodimentKey 用于开发测试
-
-    注意：这只是临时方案，真实的 embodiment_keys 应该从 dataloader 传入
-
-    Args:
-        seed: 随机种子（可选）
-
-    Returns:
-        随机生成的 EmbodimentKey
-    """
-    if seed is not None:
-        rng = random.Random(seed)
-    else:
-        rng = random
-
-    # 随机选择 robot 配置
-    robot_configs = [
-        ("simpler", 7, "cartesian"),
-        ("franka", 7, "cartesian"),
-        ("aloha", 14, "joint"),
-        ("ur5", 6, "joint"),
-    ]
-
-    robot_type, dof, action_space = rng.choice(robot_configs)
-
-    return EmbodimentKey(
-        robot_type=robot_type,
-        dof=dof,
-        action_space=action_space,
-        state_space=rng.choice(["cartesian", "joint"]),
-        coordinate_frame=rng.choice(["base", "world"]),
-        image_crop=rng.choice([True, False]),
-        image_rotation=rng.choice([True, False]),
-        image_flip=False,  # 较少使用
-        camera_viewpoint_id="default",
-    )
-
-
-def _generate_random_embodiment_keys_batch(batch_size: int, same_embodiment: bool = True) -> list[EmbodimentKey]:
-    """
-    临时函数：为一个 batch 生成随机的 embodiment_keys
-
-    Args:
-        batch_size: batch 大小
-        same_embodiment: 是否让整个 batch 使用相同的 embodiment
-                        True: 模拟单数据集训练
-                        False: 模拟多数据集混合训练
-
-    Returns:
-        List of EmbodimentKey，长度为 batch_size
-    """
-    if same_embodiment:
-        # 整个 batch 使用相同的 embodiment（单数据集场景）
-        key = _generate_random_embodiment_key()
-        return [key] * batch_size
-    else:
-        # 每个样本随机选择 embodiment（多数据集场景）
-        return [_generate_random_embodiment_key(seed=i) for i in range(batch_size)]
-
-
-# ============================================================================
-
 
 class AlignBuffer:
     """Buffer for storing online interaction data for alignment adaptation.
@@ -308,16 +246,16 @@ class PI0Pytorch(nn.Module):
             # num_embeddings: bank_size (max number of embodiments)
             # embedding_dim: num_tokens * hidden_dim (flattened)
             embedding_dim = self.peft_num_tokens * action_expert_config.width
-            self.peft_prefix_token_bank = nn.Embedding(
+            self.prefix_token_bank = nn.Embedding(
                 num_embeddings=self.peft_token_bank_size,
                 embedding_dim=embedding_dim
             )
 
             # Initialize weights
             if self.peft_init == 'normal':
-                nn.init.normal_(self.peft_prefix_token_bank.weight, mean=0.0, std=0.02)
+                nn.init.normal_(self.prefix_token_bank.weight, mean=0.0, std=0.02)
             else:  # 'zeros'
-                nn.init.zeros_(self.peft_prefix_token_bank.weight)
+                nn.init.zeros_(self.prefix_token_bank.weight)
 
             # Store shape info for reshaping
             self.token_hidden_dim = action_expert_config.width
@@ -332,7 +270,7 @@ class PI0Pytorch(nn.Module):
                 self.embodiment_registry.load(embodiment_path)
                 logging.info(f"Loaded embodiment registry: {len(self.embodiment_registry)} embeddings")
         else:
-            self.peft_prefix_token_bank = None
+            self.prefix_token_bank = None
             self.embodiment_registry = None
 
         # Alignment expert prediction heads (if enabled)
@@ -394,35 +332,23 @@ class PI0Pytorch(nn.Module):
         Returns:
             e_token: [batch_size, num_tokens, hidden_dim]
         """
-        if not self.use_peft_prefix_token or self.peft_prefix_token_bank is None:
-            return None
+        # if not self.use_peft_prefix_token or self.peft_prefix_token_bank is None:
+        #     return None
 
-        # 转换为 list
-        if not isinstance(embodiment_keys, list):
-            embodiment_keys = [embodiment_keys] * batch_size
+        # # 转换为 list
+        # if not isinstance(embodiment_keys, list):
+        #     embodiment_keys = [embodiment_keys] * batch_size
 
         # 获取每个样本的 embodiment ID
         embodiment_ids = []
         for key in embodiment_keys:
-            # 将 key 转为临时 config 以使用 registry
-            temp_config = EmbodimentConfig(
-                dataset_name=key.robot_type,  # 临时使用 robot_type
-                robot_type=key.robot_type,
-                dof=key.dof,
-                action_space=key.action_space,
-                state_space=key.state_space,
-                coordinate_frame=key.coordinate_frame,
-                image_crop=key.image_crop,
-                image_rotation=key.image_rotation,
-                image_flip=key.image_flip,
-                camera_viewpoint_id=key.camera_viewpoint_id,
-            )
-            embodiment_id = self.embodiment_registry.get_or_register(temp_config)
+            # 直接使用 key 注册或获取 embodiment ID
+            embodiment_id = self.embodiment_registry.get_or_register(key)
             embodiment_ids.append(embodiment_id)
 
         # 从 nn.Embedding 中查询 tokens
-        embodiment_ids = torch.tensor(embodiment_ids, dtype=torch.long, device=self.peft_prefix_token_bank.weight.device)
-        e_tokens_flat = self.peft_prefix_token_bank(embodiment_ids)  # [batch_size, num_tokens * hidden_dim]
+        embodiment_ids = torch.tensor(embodiment_ids, dtype=torch.long, device=self.prefix_token_bank.weight.device)
+        e_tokens_flat = self.prefix_token_bank(embodiment_ids)  # [batch_size, num_tokens * hidden_dim]
 
         # Reshape to [batch_size, num_tokens, hidden_dim]
         e_tokens = e_tokens_flat.view(batch_size, self.peft_num_tokens, self.token_hidden_dim)
@@ -464,9 +390,9 @@ class PI0Pytorch(nn.Module):
         att_2d_masks_4d = att_2d_masks[:, None, :, :]
         return torch.where(att_2d_masks_4d, 0.0, -2.3819763e38)
 
-    def _preprocess_observation(self, observation, *, train=True):
+    def _preprocess_observation(self, observation, *, train=True, aug_config=None):
         """Helper method to preprocess observation."""
-        observation = _preprocessing.preprocess_observation_pytorch(observation, train=train)
+        observation = _preprocessing.preprocess_observation_pytorch(observation, train=train, aug_config=aug_config)
         return (
             list(observation.images.values()),
             list(observation.image_masks.values()),
@@ -747,6 +673,27 @@ class PI0Pytorch(nn.Module):
 
         return embs, pad_masks, att_masks, adarms_cond, block_diagonal_ranges
 
+    def online_observation_aug_config(self):
+        # 设置默认值（无增强）
+        aug_config = {
+            'crop': 1.0,
+            'rotation': 0,
+            'flip': 0
+        }
+
+        if random.random() < 0.3:
+            aug_config.update({'crop': random.choice(numpy.arange(0.8, 1, 0.05))})
+
+        if random.random() < 0.3:
+            aug_config.update({'rotation': random.choice(numpy.arange(-20, 20, 5))})
+
+        if random.random() < 0.1:
+            aug_config.update({'flip': random.choice([1, 0])})
+
+        aug_config_key = f"crop_{aug_config['crop']}_rot_{aug_config['rotation']}_flip_{aug_config['flip']}"
+
+        return aug_config, aug_config_key
+
     def forward(self, observation, actions, noise=None, time=None, next_obs=None, embodiment_keys=None) -> Tensor:
         """Do a full training forward pass and compute the loss (batch_size x num_steps x num_motors)
 
@@ -763,7 +710,8 @@ class PI0Pytorch(nn.Module):
             If use_alignment_expert=False: action_loss tensor
             If use_alignment_expert=True: (action_loss, alignment_losses dict)
         """
-        images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(observation, train=True)
+        aug_config, aug_config_key = self.online_observation_aug_config()
+        images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(observation, train=True, aug_config=aug_config)
 
         if noise is None:
             noise = self.sample_noise(actions.shape, actions.device)
@@ -775,13 +723,10 @@ class PI0Pytorch(nn.Module):
         # TODO: Remove this when dataloader provides real embodiment_keys
         if embodiment_keys is None:
             batch_size = actions.shape[0]
-            # 使用 same_embodiment=True 模拟单数据集训练
-            # 设置为 False 可以测试多数据集场景
-            embodiment_keys = _generate_random_embodiment_keys_batch(
-                batch_size=batch_size,
-                same_embodiment=True  # 改为 False 测试多 embodiment
-            )
-            logging.debug(f"[TEMP] Generated random embodiment_keys: {embodiment_keys[0]}")
+            base_embodiment_keys = ('robot_type', 'dof', 'action_space', 'state_space', 'coordinate_frame', 'image_crop', 'image_rotation', 'image_flip', 'camera_viewpoint_id')
+            embodiment_keys = base_embodiment_keys + (aug_config_key,)  # Wrap string in tuple
+            embodiment_keys = [embodiment_keys] * batch_size
+
 
         # Action Expert: prepare diffusion inputs
         time_expanded = time[:, None, None]
@@ -793,7 +738,7 @@ class PI0Pytorch(nn.Module):
 
         # Alignment Expert: prepare diffusion inputs for three tasks
         if use_alignment_expert and next_obs is not None:
-            images_next, img_masks_next, lang_tokens_next, lang_masks_next, state_next = self._preprocess_observation(next_obs, train=True)
+            images_next, img_masks_next, lang_tokens_next, lang_masks_next, state_next = self._preprocess_observation(next_obs, train=True, aug_config=aug_config)
             time_expanded_state = time[:, None]  # [batch_size, 1]
             time_expanded_iamge_feat = time[:, None, None]  # [batch_size, 1, 1]
             time_expanded_action = time[:, None]  # [batch_size, 1]
@@ -1055,8 +1000,8 @@ class PI0Pytorch(nn.Module):
         update_peft_token = self.align_kwargs.get('update_peft_token', True)
 
         params_to_opt = []
-        if update_peft_token and getattr(self, 'use_peft_prefix_token', False) and self.peft_prefix_token_bank is not None:
-            params_to_opt.append(self.peft_prefix_token_bank.weight)
+        if update_peft_token and getattr(self, 'use_peft_prefix_token', False) and self.prefix_token_bank is not None:
+            params_to_opt.append(self.prefix_token_bank.weight)
 
         if len(params_to_opt) == 0:
             logging.warning("No E-Token Bank parameters available for alignment. Skipping align.")
@@ -1154,7 +1099,7 @@ class PI0Pytorch(nn.Module):
             actions_shape = (bsize, self.config.action_horizon, self.config.action_dim)
             noise = self.sample_noise(actions_shape, device)
 
-        images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(observation, train=False)
+        images, img_masks, lang_tokens, lang_masks, state, _ = self._preprocess_observation(observation, train=False)
 
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
         prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
