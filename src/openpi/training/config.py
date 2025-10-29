@@ -64,7 +64,8 @@ class AssetsConfig:
 @dataclasses.dataclass(frozen=True)
 class DataConfig:
     # LeRobot repo id. If None, fake data will be created.
-    repo_id: str | None = None
+    # Can be a single repo_id (str) or multiple repo_ids (list[str]) for multi-dataset training.
+    repo_id: str | list[str] | None = None
     # Maximum number of episodes to load. If None, all episodes will be loaded.
     max_num_episodes: int | None = None
     # Directory within the assets directory containing the data assets.
