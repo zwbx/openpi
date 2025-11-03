@@ -49,7 +49,7 @@ def main():
     init_logging()
 
     # 配置路径
-    debug_inputs_path = Path("/opt/tiger/openpi/checkpoints/pi05_simpler_debug/pytorch_test/debug_model_inputs.pt")
+    debug_inputs_path = Path("checkpoints/pi05_simpler_debug/pytorch_test/debug_model_inputs.pt")
 
     if not debug_inputs_path.exists():
         logging.error(f"调试输入文件不存在: {debug_inputs_path}")

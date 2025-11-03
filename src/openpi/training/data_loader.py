@@ -8,6 +8,7 @@ from typing import Literal, Protocol, SupportsIndex, TypeVar
 import jax
 import jax.numpy as jnp
 import lerobot.common.datasets.lerobot_dataset as lerobot_dataset
+from  lerobot.common.datasets.lerobot_dataset import LeRobotDataset, MultiLeRobotDataset
 import numpy as np
 import torch
 
@@ -127,6 +128,26 @@ class FakeDataset(Dataset):
         return self._num_samples
 
 
+class CustomLeRobotDataset(LeRobotDataset):
+    def __init__(self, repo_id: str, root: str, delta_timestamps: dict, episodes: list):
+        super().__init__(repo_id, root, delta_timestamps, episodes)
+
+    def __getitem__(self, idx):
+        pass
+        return super().__getitem__(idx)
+
+
+    
+
+class CustomMultiLeRobotDataset(MultiLeRobotDataset):
+    def __init__(self, repo_ids: list, root: str, delta_timestamps: dict, episodes: list):
+        super().__init__(repo_ids, root, delta_timestamps, episodes)
+
+    def __getitem__(self, idx):
+        
+
+        return super().__getitem__(idx)
+
 def create_torch_dataset(
     data_config: _config.DataConfig, action_horizon: int, model_config: _model.BaseModelConfig
 ) -> Dataset:
@@ -137,6 +158,7 @@ def create_torch_dataset(
         raise ValueError("Repo ID is not set. Cannot create dataset.")
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
+
 
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id, root=data_config.dataset_root)
     # Use only first 100 episodes for faster loading (LeRobot performance issue #93)
@@ -157,7 +179,7 @@ def create_torch_dataset(
         if key.startswith("observation."):
             delta_timestamps[key] = [0, 1 / dataset_meta.fps]
 
-    dataset = lerobot_dataset.LeRobotDataset(
+    dataset = CustomLeRobotDataset(
         data_config.repo_id,
         root=data_config.dataset_root,
         delta_timestamps=delta_timestamps,

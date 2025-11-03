@@ -19,6 +19,14 @@
         "console": "integratedTerminal",
         "justMyCode": true
     },
+    {
+        "name": "data",
+        "type": "python",
+        "request": "launch",
+        "program": "test_multidata_debug.py",
+        "console": "integratedTerminal",
+        "justMyCode": true
+    },
     
     {
         "name": "Python: SimplerEnv pi05",
