@@ -20,6 +20,23 @@
         "justMyCode": true
     },
     {
+        "name": "train_pytorch",
+        "type": "python",
+        "request": "launch",
+        "program": "scripts/train_pytorch.py",
+        "args": ["pi05_simpler_debug", "--exp_name", "test"],
+        "console": "integratedTerminal",
+        "justMyCode": true
+    },
+    {
+        "name": "model",
+        "type": "python",
+        "request": "launch",
+        "program": "test_model_debug.py",
+        "console": "integratedTerminal",
+        "justMyCode": true
+    },
+    {
         "name": "data",
         "type": "python",
         "request": "launch",

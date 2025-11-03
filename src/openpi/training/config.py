@@ -296,6 +296,7 @@ class LeRobotSimplerDataConfig(DataConfigFactory):
                         "state": "observation.state", 
                         "actions": "action",
                         "prompt": "prompt",
+                        "key":"key"
                     }
                 )
             ]

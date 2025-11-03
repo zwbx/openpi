@@ -726,6 +726,9 @@ class PI0Pytorch(nn.Module):
             base_embodiment_keys = ('robot_type', 'dof', 'action_space', 'state_space', 'coordinate_frame', 'image_crop', 'image_rotation', 'image_flip', 'camera_viewpoint_id')
             embodiment_keys = base_embodiment_keys + (aug_config_key,)  # Wrap string in tuple
             embodiment_keys = [embodiment_keys] * batch_size
+        else:
+            base_embodiment_keys + aug_config_key
+
 
 
         # Action Expert: prepare diffusion inputs

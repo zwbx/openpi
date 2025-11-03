@@ -554,18 +554,38 @@ class TorchDataLoader:
                 except StopIteration:
                     break  # We've exhausted the dataset. Create a new iterator and start over.
                 num_items += 1
+
+
+                # Extract 'key' field if present (it's a list of strings and cannot be converted to tensor)
+                keys = batch.pop('key', None)
+
                 # For JAX, convert to sharded arrays; for PyTorch, return torch tensors
                 if self._sharding is not None:
-                    yield jax.tree.map(lambda x: jax.make_array_from_process_local_data(self._sharding, x), batch)
+                    batch = jax.tree.map(lambda x: jax.make_array_from_process_local_data(self._sharding, x), batch)
                 else:
-                    yield jax.tree.map(torch.as_tensor, batch)
+                    batch = jax.tree.map(torch.as_tensor, batch)
+
+                # Add keys back to batch
+                if keys is not None:
+                    batch['key'] = keys
+
+                yield batch
 
 
 def _collate_fn(items):
+
+    keys = [item.pop('key', None) for item in items]
+
+
     """Collate the batch elements into batched numpy arrays."""
     # Make sure to convert to numpy arrays before stacking since some of the incoming elements
     # may be JAX arrays.
-    return jax.tree.map(lambda *xs: np.stack([np.asarray(x) for x in xs], axis=0), *items)
+    batch = jax.tree.map(lambda *xs: np.stack([np.asarray(x) for x in xs], axis=0), *items)
+
+    if any(k is not None for k in keys):
+        batch['key'] = keys
+
+    return batch 
 
 
 def _worker_init_fn(worker_id: int) -> None:

@@ -122,7 +122,7 @@ def main():
     logging.info("迭代一个 batch 进行检查...")
     try:
         it = iter(data_loader)
-        observation, actions, next_obs = next(it)
+        observation, actions, next_obs, key = next(it)
 
         # 将张量移动到设备（仅在 PyTorch 模式下）
         if hasattr(observation, "image") and observation.image is not None:

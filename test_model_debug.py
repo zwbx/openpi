@@ -49,7 +49,7 @@ def main():
     init_logging()
 
     # 配置路径
-    debug_inputs_path = Path("checkpoints/pi05_simpler_debug/pytorch_test/debug_model_inputs.pt")
+    debug_inputs_path = Path("checkpoints/pi05_simpler_debug/test/debug_model_inputs.pt")
 
     if not debug_inputs_path.exists():
         logging.error(f"调试输入文件不存在: {debug_inputs_path}")
@@ -68,6 +68,7 @@ def main():
     observation = inputs["observation"]
     actions = inputs["actions"]
     next_obs = inputs["next_obs"]
+    key = inputs['key']
 
     # 打印输入数据形状
     logging.info("=" * 80)
@@ -140,7 +141,7 @@ def main():
     try:
         # Forward pass
         with torch.no_grad():  # 不需要梯度,方便调试
-            losses = model(observation, actions, next_obs=next_obs)
+            losses = model(observation, actions, next_obs=next_obs, embodiment_keys=key)
 
         logging.info("Forward pass 成功!")
         logging.info(f"losses: {losses}")

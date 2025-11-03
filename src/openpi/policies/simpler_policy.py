@@ -49,6 +49,7 @@ class SimplerInputs(transforms.DataTransformFn):
                 # "left_wrist_0_rgb": np.False_,
                 # "right_wrist_0_rgb": np.False_,
             },
+            "key": data['key']
         }
 
         if "actions" in data:
