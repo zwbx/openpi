@@ -159,8 +159,17 @@ def create_torch_dataset(
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
 
+    # Check if repo_id is a list (for multi-dataset support)
+    is_multi_dataset = isinstance(repo_id, (list, tuple))
 
-    dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id, root=data_config.dataset_root)
+    if is_multi_dataset:
+        # For multi-dataset, use the first repo_id to get metadata
+        # Assumes all datasets have the same FPS and feature structure
+        first_repo_id = repo_id[0]
+        dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(first_repo_id, root=data_config.dataset_root)
+    else:
+        dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id, root=data_config.dataset_root)
+
     # Use only first 100 episodes for faster loading (LeRobot performance issue #93)
     if max_num_episodes is not None:
         episode_indices = list(range(max_num_episodes))
@@ -179,12 +188,21 @@ def create_torch_dataset(
         if key.startswith("observation."):
             delta_timestamps[key] = [0, 1 / dataset_meta.fps]
 
-    dataset = CustomLeRobotDataset(
-        data_config.repo_id,
-        root=data_config.dataset_root,
-        delta_timestamps=delta_timestamps,
-        episodes=episode_indices,
-    )
+    # Create appropriate dataset based on repo_id type
+    if is_multi_dataset:
+        dataset = CustomMultiLeRobotDataset(
+            repo_ids=repo_id,
+            root=data_config.dataset_root,
+            delta_timestamps=delta_timestamps,
+            episodes=episode_indices,
+        )
+    else:
+        dataset = CustomLeRobotDataset(
+            repo_id=repo_id,
+            root=data_config.dataset_root,
+            delta_timestamps=delta_timestamps,
+            episodes=episode_indices,
+        )
 
     if data_config.prompt_from_task:
         dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
