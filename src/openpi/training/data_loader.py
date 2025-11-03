@@ -129,21 +129,54 @@ class FakeDataset(Dataset):
 
 
 class CustomLeRobotDataset(LeRobotDataset):
-    def __init__(self, repo_id: str, root: str, delta_timestamps: dict, episodes: list):
-        super().__init__(repo_id, root, delta_timestamps, episodes)
+    def __init__(self, repo_id: str, root: str, delta_timestamps: dict, episodes: list, dataset_meta):
+        super().__init__(repo_id=repo_id, root=root, delta_timestamps=delta_timestamps, episodes=episodes)
 
-    def __getitem__(self, idx):
-        pass
-        return super().__getitem__(idx)
+        self.dataset_meta = dataset_meta
+    def __getitem__(self, idx) -> dict:
+        item = self.hf_dataset[idx]
+        ep_idx = item["episode_index"].item()
+
+        query_indices = None
+        if self.delta_indices is not None:
+            query_indices, padding = self._get_query_indices(idx, ep_idx)
+            query_result = self._query_hf_dataset(query_indices)
+            item = {**item, **padding}
+            for key, val in query_result.items():
+                item[key] = val
+
+        if len(self.meta.video_keys) > 0:
+            current_ts = item["timestamp"].item()
+            query_timestamps = self._get_query_timestamps(current_ts, query_indices)
+            video_frames = self._query_videos(query_timestamps, ep_idx)
+            item = {**video_frames, **item}
+
+        if self.image_transforms is not None:
+            image_keys = self.meta.camera_keys
+            for cam in image_keys:
+                item[cam] = self.image_transforms(item[cam])
+
+        # Add task as a string
+        task_idx = item["task_index"].item()
+        item["task"] = self.meta.tasks[task_idx]
+
+        # camera_view = len(self.dataset_meta.camera_keys)
+        repo_id = self.dataset_meta.repo_id
+        robo_type = self.dataset_meta.robot_type
+        
+        # item['key'] = f"{repo_id}_{robo_type}_{camera_view}"
+        item['key'] = f"{repo_id}_{robo_type}"
+
+        return item
 
 
     
 
-class CustomMultiLeRobotDataset(MultiLeRobotDataset):
-    def __init__(self, repo_ids: list, root: str, delta_timestamps: dict, episodes: list):
-        super().__init__(repo_ids, root, delta_timestamps, episodes)
+# class CustomMultiLeRobotDataset(MultiLeRobotDataset):
+#     def __init__(self, repo_ids: list, root: str, delta_timestamps: dict, episodes: list):
+#         super().__init__(repo_ids, root, delta_timestamps = delta_timestamps, episodes)
 
-    def __getitem__(self, idx):
+#     def __getitem__(self, idx):
         
 
         return super().__getitem__(idx)
@@ -202,6 +235,7 @@ def create_torch_dataset(
             root=data_config.dataset_root,
             delta_timestamps=delta_timestamps,
             episodes=episode_indices,
+            dataset_meta=dataset_meta
         )
 
     if data_config.prompt_from_task:
@@ -629,4 +663,4 @@ class DataLoaderImpl(DataLoader):
                         next_obs_dict[key] = batch[key]
                 next_obs = _model.Observation.from_dict(next_obs_dict)
 
-            yield _model.Observation.from_dict(batch), batch["actions"], next_obs
+            yield _model.Observation.from_dict(batch), batch["actions"], next_obs, batch['key']

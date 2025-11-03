@@ -94,13 +94,14 @@ def main():
 
     # 将 repo_id 扩展为列表以启用 MultiLeRobotDataset
     # 为避免下载其他数据集，默认重复使用同一 repo 两次进行组合调试
-    if isinstance(data_config.repo_id, str):
-        multi_repo = [data_config.repo_id, data_config.repo_id]
-    elif isinstance(data_config.repo_id, (list, tuple)):
-        multi_repo = list(data_config.repo_id)
-    else:
-        logging.error("DataConfig.repo_id 未设置，无法创建数据集")
-        sys.exit(1)
+    # if isinstance(data_config.repo_id, str):
+    #     multi_repo = [data_config.repo_id, data_config.repo_id]
+    # elif isinstance(data_config.repo_id, (list, tuple)):
+    #     multi_repo = list(data_config.repo_id)
+    # else:
+    #     logging.error("DataConfig.repo_id 未设置，无法创建数据集")
+    #     sys.exit(1)
+    multi_repo = data_config.repo_id
 
     data_config_multi = dataclasses.replace(data_config, repo_id=multi_repo)
     logging.info(f"Multi repo_id: {data_config_multi.repo_id}")
