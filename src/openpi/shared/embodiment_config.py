@@ -155,8 +155,6 @@ class EmbodimentRegistry:
         """
         # 如果是 NamedTuple，自动转换为 tuple（NamedTuple 本质上是 tuple 的子类）
         # 这个转换是零成本的，因为 NamedTuple 内部就是 tuple
-        if not isinstance(key, tuple):
-            key = tuple(key)
 
         if key in self.key_to_idx:
             return self.key_to_idx[key]
