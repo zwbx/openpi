@@ -47,48 +47,46 @@ def _sample_discrete(options: Sequence, batch_size: int, device: torch.device) -
 
 
 def _boxes_from_scale_pos(scales: torch.Tensor, pos_indices: torch.Tensor) -> torch.Tensor:
-    """构造每个样本的裁剪 box（归一化坐标 [x1,y1,x2,y2]）。
+    """构造每个样本的裁剪 box 角点（归一化坐标 [B, 4, 2]）。
 
+    角点顺序: top-left, top-right, bottom-right, bottom-left
     pos_indices: 0:C,1:U,2:D,3:L,4:R
     """
     b = scales.shape[0]
-    boxes = torch.zeros((b, 4), device=scales.device, dtype=scales.dtype)
-    # 默认中心
-    x1_c = (1 - scales) / 2
-    y1_c = (1 - scales) / 2
-    x2_c = 1 - x1_c
-    y2_c = 1 - y1_c
+    # 默认中心裁剪边界（x1,y1,x2,y2）
+    x1 = (1 - scales) / 2
+    y1 = (1 - scales) / 2
+    x2 = 1 - x1
+    y2 = 1 - y1
 
-    boxes[:, 0] = x1_c
-    boxes[:, 1] = y1_c
-    boxes[:, 2] = x2_c
-    boxes[:, 3] = y2_c
-
-    # U: 顶部对齐
-    u_mask = pos_indices == 1
+    # 根据位置对齐覆盖边界
+    u_mask = pos_indices == 1  # Up
     if u_mask.any():
-        boxes[u_mask, 1] = 0.0
-        boxes[u_mask, 3] = scales[u_mask]
+        y1 = torch.where(u_mask, torch.zeros_like(y1), y1)
+        y2 = torch.where(u_mask, scales, y2)
 
-    # D: 底部对齐
-    d_mask = pos_indices == 2
+    d_mask = pos_indices == 2  # Down
     if d_mask.any():
-        boxes[d_mask, 1] = 1.0 - scales[d_mask]
-        boxes[d_mask, 3] = 1.0
+        y1 = torch.where(d_mask, 1.0 - scales, y1)
+        y2 = torch.where(d_mask, torch.ones_like(y2), y2)
 
-    # L: 左侧对齐
-    l_mask = pos_indices == 3
+    l_mask = pos_indices == 3  # Left
     if l_mask.any():
-        boxes[l_mask, 0] = 0.0
-        boxes[l_mask, 2] = scales[l_mask]
+        x1 = torch.where(l_mask, torch.zeros_like(x1), x1)
+        x2 = torch.where(l_mask, scales, x2)
 
-    # R: 右侧对齐
-    r_mask = pos_indices == 4
+    r_mask = pos_indices == 4  # Right
     if r_mask.any():
-        boxes[r_mask, 0] = 1.0 - scales[r_mask]
-        boxes[r_mask, 2] = 1.0
+        x1 = torch.where(r_mask, 1.0 - scales, x1)
+        x2 = torch.where(r_mask, torch.ones_like(x2), x2)
 
-    return boxes.clamp(0, 1)
+    # 组装角点 [B, 4, 2]
+    tl = torch.stack([x1, y1], dim=1)
+    tr = torch.stack([x2, y1], dim=1)
+    br = torch.stack([x2, y2], dim=1)
+    bl = torch.stack([x1, y2], dim=1)
+    points = torch.stack([tl, tr, br, bl], dim=1)
+    return points.clamp(0, 1)
 
 
 def _apply_color_presets(x: torch.Tensor, preset_indices: torch.Tensor) -> torch.Tensor:
