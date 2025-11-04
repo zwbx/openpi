@@ -390,16 +390,42 @@ class PI0Pytorch(nn.Module):
         att_2d_masks_4d = att_2d_masks[:, None, :, :]
         return torch.where(att_2d_masks_4d, 0.0, -2.3819763e38)
 
-    def _preprocess_observation(self, observation, *, train=True, aug_config=None):
-        """Helper method to preprocess observation."""
-        observation = _preprocessing.preprocess_observation_pytorch(observation, train=train, aug_config=aug_config)
-        return (
-            list(observation.images.values()),
-            list(observation.image_masks.values()),
-            observation.tokenized_prompt,
-            observation.tokenized_prompt_mask,
-            observation.state,
+    def _preprocess_observation(self, observation, *, train=True, return_aug_params=False):
+        """Helper method to preprocess observation.
+
+        Args:
+            observation: Input observation
+            train: Whether in training mode
+            return_aug_params: If True, return augmentation parameters from Kornia
+
+        Returns:
+            If return_aug_params=False:
+                (images, img_masks, lang_tokens, lang_masks, state)
+            If return_aug_params=True:
+                ((images, img_masks, lang_tokens, lang_masks, state), aug_metadata_dict)
+        """
+        result = _preprocessing.preprocess_observation_pytorch(
+            observation, train=train, return_aug_params=return_aug_params
         )
+
+        if return_aug_params:
+            observation, aug_params = result
+            return (
+                list(observation.images.values()),
+                list(observation.image_masks.values()),
+                observation.tokenized_prompt,
+                observation.tokenized_prompt_mask,
+                observation.state,
+            ), aug_params
+        else:
+            observation = result
+            return (
+                list(observation.images.values()),
+                list(observation.image_masks.values()),
+                observation.tokenized_prompt,
+                observation.tokenized_prompt_mask,
+                observation.state,
+            )
 
     def sample_noise(self, shape, device):
         return torch.normal(
@@ -673,27 +699,6 @@ class PI0Pytorch(nn.Module):
 
         return embs, pad_masks, att_masks, adarms_cond, block_diagonal_ranges
 
-    def online_observation_aug_config(self):
-        # 设置默认值（无增强）
-        aug_config = {
-            'crop': 1.0,
-            'rotation': 0,
-            'flip': 0
-        }
-
-        if random.random() < 0.3:
-            aug_config.update({'crop': random.choice(numpy.arange(0.8, 1, 0.05))})
-
-        if random.random() < 0.3:
-            aug_config.update({'rotation': random.choice(numpy.arange(-20, 20, 5))})
-
-        if random.random() < 0.1:
-            aug_config.update({'flip': random.choice([1, 0])})
-
-        aug_config_key = f"crop_{aug_config['crop']}_rot_{aug_config['rotation']}_flip_{aug_config['flip']}"
-
-        return aug_config, aug_config_key
-
     def forward(self, observation, actions, noise=None, time=None, next_obs=None, embodiment_keys=None) -> Tensor:
         """Do a full training forward pass and compute the loss (batch_size x num_steps x num_motors)
 
@@ -710,8 +715,13 @@ class PI0Pytorch(nn.Module):
             If use_alignment_expert=False: action_loss tensor
             If use_alignment_expert=True: (action_loss, alignment_losses dict)
         """
-        aug_config, aug_config_key = self.online_observation_aug_config()
-        images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(observation, train=True, aug_config=aug_config)
+        batch_size = actions.shape[0]
+        # Kornia handles per-sample augmentation automatically in _preprocess_observation
+        # Get augmentation parameters for embodiment key generation
+        (images, img_masks, lang_tokens, lang_masks, state), aug_metadata = self._preprocess_observation(
+            observation, train=True, return_aug_params=True
+        )
+        aug_config_keys = aug_metadata["keys"]
 
         if noise is None:
             noise = self.sample_noise(actions.shape, actions.device)
@@ -719,15 +729,21 @@ class PI0Pytorch(nn.Module):
         if time is None:
             time = self.sample_time(actions.shape[0], actions.device)
 
-        # TEMPORARY: Generate random embodiment_keys if not provided
-        # TODO: Remove this when dataloader provides real embodiment_keys
+        # 组合外部初始 key 与增广 key，确保一一对应
         if embodiment_keys is None:
-            batch_size = actions.shape[0]
-            base_embodiment_keys = ('robot_type', 'dof', 'action_space', 'state_space', 'coordinate_frame', 'image_crop', 'image_rotation', 'image_flip', 'camera_viewpoint_id')
-            embodiment_keys = base_embodiment_keys + (aug_config_key,)  # Wrap string in tuple
+            embodiment_keys = [tuple() for _ in range(batch_size)]
+        elif not isinstance(embodiment_keys, list):
             embodiment_keys = [embodiment_keys] * batch_size
-        else:
-            base_embodiment_keys + aug_config_key
+
+        if len(embodiment_keys) != batch_size:
+            raise ValueError(
+                f"embodiment_keys length {len(embodiment_keys)} != batch_size {batch_size}"
+            )
+
+        embodiment_keys = [
+            tuple(base_key) + (aug_key,)
+            for base_key, aug_key in zip(embodiment_keys, aug_config_keys, strict=True)
+        ]
 
 
 
@@ -741,7 +757,7 @@ class PI0Pytorch(nn.Module):
 
         # Alignment Expert: prepare diffusion inputs for three tasks
         if use_alignment_expert and next_obs is not None:
-            images_next, img_masks_next, lang_tokens_next, lang_masks_next, state_next = self._preprocess_observation(next_obs, train=True, aug_config=aug_config)
+            images_next, img_masks_next, lang_tokens_next, lang_masks_next, state_next = self._preprocess_observation(next_obs, train=True)
             time_expanded_state = time[:, None]  # [batch_size, 1]
             time_expanded_iamge_feat = time[:, None, None]  # [batch_size, 1, 1]
             time_expanded_action = time[:, None]  # [batch_size, 1]

@@ -2,6 +2,7 @@ from collections.abc import Sequence
 import logging
 
 import torch
+import kornia.augmentation as K
 
 from openpi.shared import image_tools
 
@@ -16,25 +17,213 @@ IMAGE_KEYS = (
 
 IMAGE_RESOLUTION = (224, 224)
 
+# Kornia augmentation pipeline cache（按设备 + 视角类型存储）
+# same_on_batch=False ensures each sample in batch gets different augmentation
+_train_aug_pipelines: dict[str, K.AugmentationSequential] = {}
+
+
+def _pipeline_cache_key(device: torch.device | None, view_type: str) -> str:
+    device_key = str(device) if device is not None else "cpu"
+    return f"{view_type}:{device_key}"
+
+
+def _default_aug_descriptor() -> dict[str, float | int]:
+    return {
+        "crop_scale": 1.0,
+        "crop_ratio": 1.0,
+        "rotation_deg": 0.0,
+        "flip": 0,
+        "brightness": 1.0,
+        "contrast": 1.0,
+        "saturation": 1.0,
+        "hue": 0.0,
+    }
+
+
+def _format_aug_descriptor(descriptor: dict[str, float | int]) -> str:
+    return (
+        f"crop_{descriptor['crop_scale']:.2f}_ratio_{descriptor['crop_ratio']:.2f}_"
+        f"rot_{descriptor['rotation_deg']:.1f}_flip_{descriptor['flip']}_"
+        f"b_{descriptor['brightness']:.2f}_c_{descriptor['contrast']:.2f}_"
+        f"s_{descriptor['saturation']:.2f}_h_{descriptor['hue']:.2f}"
+    )
+
+
+def get_train_aug_pipeline(device: torch.device | None, view_type: str = "default"):
+    """Get or create the training augmentation pipeline for the given device and view type."""
+
+    cache_key = _pipeline_cache_key(device, view_type)
+    pipeline = _train_aug_pipelines.get(cache_key)
+    if pipeline is None:
+        if view_type == "default":
+            pipeline = K.AugmentationSequential(
+                K.RandomResizedCrop(
+                    size=IMAGE_RESOLUTION,
+                    scale=(0.8, 1.0),
+                    ratio=(0.95, 1.05),
+                    same_on_batch=False,
+                    p=0.3,
+                ),
+                K.RandomRotation(
+                    degrees=20.0,
+                    same_on_batch=False,
+                    p=0.3,
+                ),
+                K.RandomHorizontalFlip(
+                    same_on_batch=False,
+                    p=0.1,
+                ),
+                K.ColorJitter(
+                    brightness=0.3,
+                    contrast=0.4,
+                    saturation=0.5,
+                    same_on_batch=False,
+                    p=0.8,
+                ),
+                data_keys=["input"],
+                same_on_batch=False,
+            )
+        elif view_type == "wrist":
+            pipeline = K.AugmentationSequential(
+                K.ColorJitter(
+                    brightness=0.3,
+                    contrast=0.4,
+                    saturation=0.5,
+                    same_on_batch=False,
+                    p=0.8,
+                ),
+                data_keys=["input"],
+                same_on_batch=False,
+            )
+        else:
+            raise ValueError(f"Unsupported view_type '{view_type}' for augmentation pipeline")
+
+        target_device = device if device is not None else torch.device("cpu")
+        pipeline = pipeline.to(target_device)
+        _train_aug_pipelines[cache_key] = pipeline
+
+    return pipeline
+
+
+def _collect_aug_params(
+    pipeline: K.AugmentationSequential,
+    batch_size: int,
+    view_type: str,
+) -> list[dict[str, float | int]]:
+    """Extract per-sample augmentation参数，用于构建embodiment key。
+
+    TODO: wrist 视角目前只返回颜色扰动，后续如果需要可在保持几何稳定的前提下记录更多信息。
+    """
+
+    descriptors = [_default_aug_descriptor() for _ in range(batch_size)]
+
+    for module in pipeline.children():
+        params = getattr(module, "_params", None)
+        if not params:
+            continue
+
+        batch_prob = params.get("batch_prob")
+        if batch_prob is None:
+            applied_mask = torch.ones(batch_size, dtype=torch.bool)
+        else:
+            applied_mask = batch_prob.detach().bool().cpu().reshape(batch_size, -1)
+        applied_mask = applied_mask[:, 0]
+        applied_list = applied_mask.tolist()
+
+        if isinstance(module, K.RandomResizedCrop):
+            if view_type == "wrist":
+                continue  # wrist 不做几何增广
+            scale = params.get("scale")
+            ratio = params.get("ratio")
+            if scale is not None:
+                scale = scale.detach().cpu().reshape(batch_size, -1)
+            if ratio is not None:
+                ratio = ratio.detach().cpu().reshape(batch_size, -1)
+
+            for idx in range(batch_size):
+                if idx >= len(descriptors) or not applied_list[idx]:
+                    continue
+                if scale is not None:
+                    descriptors[idx]["crop_scale"] = float(scale[idx].mean().item())
+                if ratio is not None:
+                    descriptors[idx]["crop_ratio"] = float(ratio[idx].mean().item())
+
+        elif isinstance(module, K.RandomRotation):
+            if view_type == "wrist":
+                continue
+            angle = params.get("angle")
+            if angle is not None:
+                angle = angle.detach().cpu().reshape(batch_size, -1)
+                for idx in range(batch_size):
+                    if idx >= len(descriptors) or not applied_list[idx]:
+                        continue
+                    descriptors[idx]["rotation_deg"] = float(angle[idx].mean().item())
+
+        elif isinstance(module, K.RandomHorizontalFlip):
+            if view_type == "wrist":
+                continue
+            for idx in range(batch_size):
+                if idx >= len(descriptors) or not applied_list[idx]:
+                    continue
+                descriptors[idx]["flip"] = 1
+
+        elif isinstance(module, K.ColorJitter):
+            brightness = params.get("brightness_factor")
+            contrast = params.get("contrast_factor")
+            saturation = params.get("saturation_factor")
+            hue = params.get("hue_factor")
+
+            if brightness is not None:
+                brightness = brightness.detach().cpu().reshape(batch_size, -1)
+            if contrast is not None:
+                contrast = contrast.detach().cpu().reshape(batch_size, -1)
+            if saturation is not None:
+                saturation = saturation.detach().cpu().reshape(batch_size, -1)
+            if hue is not None:
+                hue = hue.detach().cpu().reshape(batch_size, -1)
+
+            for idx in range(batch_size):
+                if idx >= len(descriptors) or not applied_list[idx]:
+                    continue
+                if brightness is not None:
+                    descriptors[idx]["brightness"] = float(brightness[idx].mean().item())
+                if contrast is not None:
+                    descriptors[idx]["contrast"] = float(contrast[idx].mean().item())
+                if saturation is not None:
+                    descriptors[idx]["saturation"] = float(saturation[idx].mean().item())
+                if hue is not None:
+                    descriptors[idx]["hue"] = float(hue[idx].mean().item())
+
+    return descriptors
+
 
 def preprocess_observation_pytorch(
     observation,
     *,
     train: bool = False,
-    aug_config: dict | None = None,
+    aug_config: dict | list[dict] | None = None,  # Kept for backward compatibility, not used with Kornia
     image_keys: Sequence[str] = IMAGE_KEYS,
     image_resolution: tuple[int, int] = IMAGE_RESOLUTION,
+    return_aug_params: bool = False,  # New parameter to return augmentation parameters
 ):
-    # Set default aug_config if training mode but no config provided
-    if train and aug_config is None:
-        aug_config = {
-            'crop': 1.0,      # No crop by default
-            'rotation': 0,    # No rotation by default
-            'flip': 0,        # No flip by default
-        }
-    """Torch.compile-compatible version of preprocess_observation_pytorch with simplified type annotations.
+    """Preprocess observation with Kornia-based per-sample augmentation.
 
-    This function avoids complex type annotations that can cause torch.compile issues.
+    Args:
+        observation: Input observation
+        train: Whether in training mode (if True, applies Kornia augmentations)
+        aug_config: Deprecated, kept for backward compatibility (Kornia handles augmentation automatically)
+        image_keys: Keys for images to process
+        image_resolution: Target image resolution
+        return_aug_params: If True, return augmentation parameters from Kornia
+
+    Returns:
+        If return_aug_params=False:
+            Preprocessed observation with augmentations applied
+        If return_aug_params=True:
+            (processed_obs, {
+                "params": List[Dict[str, descriptor]],  # 每个样本的视角 -> 增广参数
+                "keys": List[str],  # 聚合后的字符串 key，用于构建 embodiment_keys
+            })
     """
     # 根据实际observation中的图像动态设置image_keys
     if observation.images:
@@ -44,26 +233,14 @@ def preprocess_observation_pytorch(
         raise ValueError(f"images dict missing keys: expected {image_keys}, got {list(observation.images)}")
 
     batch_shape = observation.state.shape[:-1]
-
     out_images = {}
-
-    
-    # # Track augmentation application and discretized buckets
-    # augmentation_flags = {
-    #     # "brightness": False,
-    #     # "contrast": False,
-    #     # "saturation": False,
-    #     # Discretized bins
-    #     "crop_bin": "c00",
-    #     "rotation_bin": "r00",
-    #     "flip_bin": "f0",
-    # }
-
+    per_sample_view_params: list[dict[str, dict[str, float | int]]] | None = None
+    per_sample_key_components: list[list[str]] | None = None
 
     for key in image_keys:
         image = observation.images[key]
+        is_wrist_view = "wrist" in key
 
-        # TODO: This is a hack to handle both [B, C, H, W] and [B, H, W, C] formats
         # Handle both [B, C, H, W] and [B, H, W, C] formats
         is_channels_first = image.shape[1] == 3  # Check if channels are in dimension 1
 
@@ -76,100 +253,47 @@ def preprocess_observation_pytorch(
             image = image_tools.resize_with_pad_torch(image, *image_resolution)
 
         if train:
-            # Convert from [-1, 1] to [0, 1] for PyTorch augmentations
+            pipeline = get_train_aug_pipeline(image.device, view_type="wrist" if is_wrist_view else "default")
+            pipeline.train()
+
+            # Convert from [-1, 1] to [0, 1] for Kornia
             image = image / 2.0 + 0.5
 
-            # Apply PyTorch-based augmentations
-            if "wrist" not in key:
-                # Geometric augmentations for non-wrist cameras
-                height, width = image.shape[1:3]
+            # Convert from [B, H, W, C] to [B, C, H, W] for Kornia
+            image = image.permute(0, 3, 1, 2)
 
-                # Random crop and resize
-                crop_height = int(height * aug_config['crop'])
-                crop_width = int(width * aug_config['crop'])
+            # Apply Kornia augmentations (automatically per-sample)
+            # Each sample in the batch gets different random augmentation parameters
+            image = pipeline(image)
 
-                # Random crop
-                max_h = height - crop_height
-                max_w = width - crop_width
-                if max_h > 0 and max_w > 0:
-                    # Use .item() to convert tensor to int for slicing
-                    start_h = torch.randint(0, max_h + 1, (1,), device=image.device).item()
-                    start_w = torch.randint(0, max_w + 1, (1,), device=image.device).item()
-                    image = image[:, start_h : start_h + crop_height, start_w : start_w + crop_width, :]
+            if return_aug_params:
+                batch_size = image.shape[0]
+                params = _collect_aug_params(
+                    pipeline,
+                    batch_size,
+                    "wrist" if is_wrist_view else "default",
+                )
 
-                # Resize back to original size
-                image = torch.nn.functional.interpolate(
-                    image.permute(0, 3, 1, 2),  # [b, h, w, c] -> [b, c, h, w]
-                    size=(height, width),
-                    mode="bilinear",
-                    align_corners=False,
-                ).permute(0, 2, 3, 1)  # [b, c, h, w] -> [b, h, w, c]
+                if per_sample_view_params is None:
+                    per_sample_view_params = [{} for _ in range(batch_size)]
+                    per_sample_key_components = [[] for _ in range(batch_size)]
 
-                # Random horizontal flip (p=0.5)
-                if aug_config['flip']:
-                    image = torch.flip(image, dims=(2,))  # flip width dimension
+                if is_wrist_view:
+                    # TODO: wrist 视角仅记录颜色扰动，如需纳入 key 可在此扩展策略
+                    for idx, descriptor in enumerate(params):
+                        per_sample_view_params[idx][key] = descriptor
+                else:
+                    for idx, descriptor in enumerate(params):
+                        per_sample_view_params[idx][key] = descriptor
+                        per_sample_key_components[idx].append(
+                            f"{key}:{_format_aug_descriptor(descriptor)}"
+                        )
 
-                # Random rotation (small angles)
-                # Convert angle to torch tensor for consistent operations
-                angle = float(aug_config['rotation'])  # Ensure it's a Python float
-                if abs(angle) > 0.1:  # Only rotate if angle is significant
-                    # Convert to torch tensor and then to radians
-                    angle_tensor = torch.tensor(angle, device=image.device, dtype=torch.float32)
-                    angle_rad = angle_tensor * torch.pi / 180.0
+            # Convert back to [B, H, W, C]
+            image = image.permute(0, 2, 3, 1)
 
-                    # Create rotation matrix
-                    cos_a = torch.cos(angle_rad)
-                    sin_a = torch.sin(angle_rad)
-
-                    # Apply rotation using grid_sample
-                    grid_x = torch.linspace(-1, 1, width, device=image.device)
-                    grid_y = torch.linspace(-1, 1, height, device=image.device)
-
-                    # Create meshgrid
-                    grid_y, grid_x = torch.meshgrid(grid_y, grid_x, indexing="ij")
-
-                    # Expand to batch dimension
-                    grid_x = grid_x.unsqueeze(0).expand(image.shape[0], -1, -1)
-                    grid_y = grid_y.unsqueeze(0).expand(image.shape[0], -1, -1)
-
-                    # Apply rotation transformation
-                    grid_x_rot = grid_x * cos_a - grid_y * sin_a
-                    grid_y_rot = grid_x * sin_a + grid_y * cos_a
-
-                    # Stack and reshape for grid_sample
-                    grid = torch.stack([grid_x_rot, grid_y_rot], dim=-1)
-
-                    image = torch.nn.functional.grid_sample(
-                        image.permute(0, 3, 1, 2),  # [b, h, w, c] -> [b, c, h, w]
-                        grid,
-                        mode="bilinear",
-                        padding_mode="zeros",
-                        align_corners=False,
-                    ).permute(0, 2, 3, 1)  # [b, c, h, w] -> [b, h, w, c]
-
-            # Color augmentations for all cameras
-            # Random brightness
-            # Use tensor operations instead of .item() for torch.compile compatibility
-            brightness_factor = 0.7 + torch.rand(1, device=image.device) * 0.6  # Random factor between 0.7 and 1.3
-            image = image * brightness_factor
-
-            # Random contrast
-            # Use tensor operations instead of .item() for torch.compile compatibility
-            contrast_factor = 0.6 + torch.rand(1, device=image.device) * 0.8  # Random factor between 0.6 and 1.4
-            mean = image.mean(dim=[1, 2, 3], keepdim=True)
-            image = (image - mean) * contrast_factor + mean
-
-            # Random saturation (convert to HSV, modify S, convert back)
-            # For simplicity, we'll just apply a random scaling to the color channels
-            # Use tensor operations instead of .item() for torch.compile compatibility
-            saturation_factor = 0.5 + torch.rand(1, device=image.device) * 1.0  # Random factor between 0.5 and 1.5
-            gray = image.mean(dim=-1, keepdim=True)
-            image = gray + (image - gray) * saturation_factor
-
-            # Clamp values to [0, 1]
+            # Clamp and convert back to [-1, 1]
             image = torch.clamp(image, 0, 1)
-
-            # Back to [-1, 1]
             image = image * 2.0 - 1.0
 
         # Convert back to [B, C, H, W] format if it was originally channels-first
@@ -199,7 +323,7 @@ def preprocess_observation_pytorch(
             for key, value in kwargs.items():
                 setattr(self, key, value)
 
-    return SimpleProcessedObservation(
+    processed_obs = SimpleProcessedObservation(
         images=out_images,
         image_masks=out_masks,
         state=state,
@@ -208,3 +332,26 @@ def preprocess_observation_pytorch(
         token_ar_mask=observation.token_ar_mask,
         token_loss_mask=observation.token_loss_mask,
     )
+
+    if return_aug_params:
+        if per_sample_view_params is None:
+            if out_images:
+                batch_size = next(iter(out_images.values())).shape[0]
+            else:
+                state_shape = observation.state.shape
+                batch_size = state_shape[0] if len(state_shape) > 0 else 1
+            per_sample_view_params = [{} for _ in range(batch_size)]
+            per_sample_key_components = [[] for _ in range(batch_size)]
+
+        keys = [
+            "|".join(components) if components else "no_geom_aug"
+            for components in per_sample_key_components
+        ]
+
+        aug_metadata = {
+            "params": per_sample_view_params,
+            "keys": keys,
+        }
+        return processed_obs, aug_metadata
+
+    return processed_obs
