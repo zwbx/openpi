@@ -740,8 +740,9 @@ class PI0Pytorch(nn.Module):
                 f"embodiment_keys length {len(embodiment_keys)} != batch_size {batch_size}"
             )
 
+
         embodiment_keys = [
-            tuple(base_key) + (aug_key,)
+            "_".join((base_key,aug_key))
             for base_key, aug_key in zip(embodiment_keys, aug_config_keys, strict=True)
         ]
 
