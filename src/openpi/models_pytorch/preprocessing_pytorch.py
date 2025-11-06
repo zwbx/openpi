@@ -46,6 +46,24 @@ def _sample_discrete(options: Sequence, batch_size: int, device: torch.device) -
     return values[idx], idx  # values per sample, and indices
 
 
+# Action scaling (discrete, per-sample)
+_ACTION_SCALES = (0.95, 1.00, 1.05)
+
+
+def sample_action_scale(batch_size: int, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+    """Sample per-sample action scales and indices from a discrete set."""
+    return _sample_discrete(_ACTION_SCALES, batch_size, device)
+
+
+def apply_action_scale(actions: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
+    """Apply per-sample action scaling.
+
+    actions: [B, T, D]
+    scales:  [B]
+    """
+    return actions * scales[:, None, None]
+
+
 def _boxes_from_scale_pos(scales: torch.Tensor, pos_indices: torch.Tensor) -> torch.Tensor:
     """构造每个样本的裁剪 box 角点（归一化坐标 [B, 4, 2]）。
 

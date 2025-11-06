@@ -721,6 +721,28 @@ class PI0Pytorch(nn.Module):
         (images, img_masks, lang_tokens, lang_masks, state), aug_metadata = self._preprocess_observation(
             observation, train=True, return_aug_params=True
         )
+        # Action augmentation: scale-only (discrete), independent from images
+        if self.training:
+            bsz = actions.shape[0]
+            scales, scale_idx = _preprocessing.sample_action_scale(bsz, actions.device)
+            actions = _preprocessing.apply_action_scale(actions, scales)
+
+            # Merge action aug into metadata (params + keys)
+            if isinstance(aug_metadata, dict):
+                params = aug_metadata.get("params")
+                if isinstance(params, list) and len(params) == bsz:
+                    for i in range(bsz):
+                        if isinstance(params[i], dict):
+                            params[i]["action"] = {
+                                "scale": float(scales[i].item()),
+                                "scale_idx": int(scale_idx[i].item()),
+                            }
+                keys = aug_metadata.get("keys")
+                if isinstance(keys, list) and len(keys) == bsz:
+                    aug_metadata["keys"] = [
+                        f"{k}|act_sc={int(scale_idx[i].item())}" for i, k in enumerate(keys)
+                    ]
+
         aug_config_keys = aug_metadata["keys"]
 
         if noise is None:
