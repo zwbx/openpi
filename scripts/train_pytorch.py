@@ -541,19 +541,20 @@ def train_loop(config: _config.TrainConfig):
             for pg in optim.param_groups:
                 pg["lr"] = lr_schedule(global_step)
 
-            # Save model inputs for debugging (only first step)
-            if global_step == 0 and is_main:
-                debug_save_path = config.checkpoint_dir / "debug_model_inputs.pt"
-                torch.save({
-                    "observation": observation,
-                    "actions": actions,
-                    "next_obs": next_obs,
-                    "key": key
-                }, debug_save_path)
-                logging.info(f"Saved model inputs to {debug_save_path} for debugging")
+            # HACK: Disable model inputs saving for debugging
+            # # Save model inputs for debugging (only first step)
+            # if global_step == 0 and is_main:
+            #     debug_save_path = config.checkpoint_dir / "debug_model_inputs.pt"
+            #     torch.save({
+            #         "observation": observation,
+            #         "actions": actions,
+            #         "next_obs": next_obs,
+            #         "key": key
+            #     }, debug_save_path)
+            #     logging.info(f"Saved model inputs to {debug_save_path} for debugging")
 
             # Forward pass
-            losses = model(observation, actions, next_obs=next_obs, embodiment_keys = key)
+            losses = model(observation, actions, next_obs=next_obs, base_embodiment_keys = key)
             # Ensure losses is a tensor and handle different return types
             if isinstance(losses, list | tuple):
                 losses = torch.stack(losses)

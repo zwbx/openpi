@@ -76,6 +76,12 @@ class Pi0Config(_model.BaseModelConfig):
     peft_token_bank_size: int = 1024  # Maximum number of embodiments (can be dynamically expanded)
     peft_init: str = "zeros"  # "zeros" | "normal"
 
+    # Augmentation probabilities (training)
+    # Probability to enable per-sample action augmentation (grouped translation/rotation)
+    action_aug_prob: float = 0.10
+    # Probability to enable per-sample observation augmentation
+    obs_aug_prob: float = 1.0
+
 
 
     # Attention restriction configuration

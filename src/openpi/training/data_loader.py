@@ -681,6 +681,12 @@ class DataLoaderImpl(DataLoader):
                 for key in batch:
                     if key not in next_obs_dict and key not in ["actions", "image", "state"]:
                         next_obs_dict[key] = batch[key]
+                #TODO
+                # # Ensure required fields exist for Observation
+                # # If next state is not available (e.g., dataset provides only current state),
+                # # fall back to using the current state's value so Observation.from_dict has all fields.
+                # if "state" not in next_obs_dict and "state" in batch:
+                #     next_obs_dict["state"] = batch["state"]
                 next_obs = _model.Observation.from_dict(next_obs_dict)
 
             yield _model.Observation.from_dict(batch), batch["actions"], next_obs, batch['key']

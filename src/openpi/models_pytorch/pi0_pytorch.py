@@ -390,6 +390,16 @@ class PI0Pytorch(nn.Module):
         att_2d_masks_4d = att_2d_masks[:, None, :, :]
         return torch.where(att_2d_masks_4d, 0.0, -2.3819763e38)
 
+    def _preprocess_actions(self, actions, *, return_aug_params=False):
+        """Helper method to preprocess actions.
+
+        Args:
+            actions: Input actions
+            return_aug_params: If True, return augmentation parameters from Kornia
+        """
+        return _preprocessing.preprocess_actions_pytorch(actions, return_aug_params=return_aug_params, action_aug_prob=self.config.action_aug_prob)
+
+
     def _preprocess_observation(self, observation, *, train=True, return_aug_params=False):
         """Helper method to preprocess observation.
 
@@ -404,8 +414,10 @@ class PI0Pytorch(nn.Module):
             If return_aug_params=True:
                 ((images, img_masks, lang_tokens, lang_masks, state), aug_metadata_dict)
         """
+        # Read observation augmentation probability from config only
+        obs_prob = float(getattr(self.config, 'obs_aug_prob', 1.0))
         result = _preprocessing.preprocess_observation_pytorch(
-            observation, train=train, return_aug_params=return_aug_params
+            observation, train=train, return_aug_params=return_aug_params, aug_enable_prob=obs_prob
         )
 
         if return_aug_params:
@@ -611,7 +623,7 @@ class PI0Pytorch(nn.Module):
         return embs, pad_masks, att_masks, adarms_cond
 
     def embed_alignment_suffix(self, noisy_state, actions, noisy_next_obs_features,
-                               next_obs_features, noisy_actions, timestep, embodiment_keys=None):
+                               next_obs_features, noisy_actions, timestep):
         """Embed alignment expert inputs for three self-supervised tasks.
 
         Tasks:
@@ -628,7 +640,6 @@ class PI0Pytorch(nn.Module):
             next_obs_embedding: Clean next observation embedding [batch_size, feature_dim]
             noisy_actions: Noisy actions for inverse dynamics [batch_size, action_horizon, action_dim]
             timestep: Diffusion timestep [batch_size]
-            embodiment_keys: Optional EmbodimentKey or List[EmbodimentKey] for Token Bank
         """
         embs = []
         pad_masks = []
@@ -699,7 +710,7 @@ class PI0Pytorch(nn.Module):
 
         return embs, pad_masks, att_masks, adarms_cond, block_diagonal_ranges
 
-    def forward(self, observation, actions, noise=None, time=None, next_obs=None, embodiment_keys=None) -> Tensor:
+    def forward(self, observation, actions, noise=None, time=None, next_obs=None, base_embodiment_keys=None) -> Tensor:
         """Do a full training forward pass and compute the loss (batch_size x num_steps x num_motors)
 
         Args:
@@ -716,58 +727,23 @@ class PI0Pytorch(nn.Module):
             If use_alignment_expert=True: (action_loss, alignment_losses dict)
         """
         batch_size = actions.shape[0]
-        # Kornia handles per-sample augmentation automatically in _preprocess_observation
-        # Get augmentation parameters for embodiment key generation
-        (images, img_masks, lang_tokens, lang_masks, state), aug_metadata = self._preprocess_observation(
+        # Preprocess observation and collect augmentation metadata
+        (images, img_masks, lang_tokens, lang_masks, state), obs_aug_metadata = self._preprocess_observation(
             observation, train=True, return_aug_params=True
         )
-        # Action augmentation: scale-only (discrete), independent from images
-        if self.training:
-            bsz = actions.shape[0]
-            scales, scale_idx = _preprocessing.sample_action_scale(bsz, actions.device)
-            actions = _preprocessing.apply_action_scale(actions, scales)
+        # Action augmentation: grouped scale via preprocessing util
+        actions, act_aug_metadata = self._preprocess_actions(actions, return_aug_params=True)
 
-            # Merge action aug into metadata (params + keys)
-            if isinstance(aug_metadata, dict):
-                params = aug_metadata.get("params")
-                if isinstance(params, list) and len(params) == bsz:
-                    for i in range(bsz):
-                        if isinstance(params[i], dict):
-                            params[i]["action"] = {
-                                "scale": float(scales[i].item()),
-                                "scale_idx": int(scale_idx[i].item()),
-                            }
-                keys = aug_metadata.get("keys")
-                if isinstance(keys, list) and len(keys) == bsz:
-                    aug_metadata["keys"] = [
-                        f"{k}|act_sc={int(scale_idx[i].item())}" for i, k in enumerate(keys)
-                    ]
-
-        aug_config_keys = aug_metadata["keys"]
+        # Build final augmentation keys from obs/action metadata and provided embodiment_keys
+        embodiment_keys = _preprocessing.build_embodiment_keys(
+            embodiment_keys, obs_aug_metadata, act_aug_metadata
+        )
 
         if noise is None:
             noise = self.sample_noise(actions.shape, actions.device)
 
         if time is None:
             time = self.sample_time(actions.shape[0], actions.device)
-
-        # 组合外部初始 key 与增广 key，确保一一对应
-        if embodiment_keys is None:
-            embodiment_keys = [tuple() for _ in range(batch_size)]
-        elif not isinstance(embodiment_keys, list):
-            embodiment_keys = [embodiment_keys] * batch_size
-
-        if len(embodiment_keys) != batch_size:
-            raise ValueError(
-                f"embodiment_keys length {len(embodiment_keys)} != batch_size {batch_size}"
-            )
-
-
-        embodiment_keys = [
-            "_".join((base_key,aug_key))
-            for base_key, aug_key in zip(embodiment_keys, aug_config_keys, strict=True)
-        ]
-
 
 
         # Action Expert: prepare diffusion inputs
@@ -817,7 +793,7 @@ class PI0Pytorch(nn.Module):
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
 
         # Embed action suffix (Action Expert)
-        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t, time, embodiment_keys=embodiment_keys)
+        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t, time)
 
         # Embed alignment suffix (Alignment Expert) if enabled
         if use_alignment_expert and next_obs is not None:
@@ -829,7 +805,6 @@ class PI0Pytorch(nn.Module):
                     next_obs_features=image_feat,  # clean next_obs for inverse dynamics task
                     noisy_actions=actions_t_inv,
                     timestep=time,
-                    embodiment_keys=embodiment_keys,
                 )
         else:
             alignment_suffix_embs = None
