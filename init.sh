@@ -17,6 +17,7 @@ sudo apt-get update && sudo apt-get install -y libgl1 libglib2.0-0 libsm6 libxex
 uv pip install numpy==1.24.4 mediapy
 uv pip install -e SimplerEnv/ManiSkill2_real2sim
 uv pip install -e SimplerEnv
+uv pip install kornia
 
 
 
@@ -84,11 +85,11 @@ echo "Wrote /etc/vulkan/implicit_layer.d/nvidia_layers.json"
 uv pip install sapien
 uv run python -m sapien.example.offscreen
 
-# # copy pi05_base_pytorch to /dev/shm/
-# cp -r /mnt/hdfs/wenbo/vla/pi05/pi05_base_pytorch /dev/shm/
+# copy pi05_base_pytorch to /dev/shm/
+cp -r /mnt/hdfs/wenbo/vla/pi05/pi05_base_pytorch /dev/shm/
 
-# # copy dataset to /opt/tiger/openpi/
-# cp -r /mnt/hdfs/wenbo/vla/lerobot-pi0-bridge.tar /opt/tiger/openpi/
+# copy dataset to /opt/tiger/pi05_align/
+cp -r /mnt/hdfs/wenbo/vla/lerobot-pi0-bridge.tar /opt/tiger/pi05_align/
 
-# # untar dataset
-# tar -xvf /opt/tiger/openpi/lerobot-pi0-bridge.tar -C /dev/shm/
+# untar dataset
+tar -xvf lerobot-pi0-bridge.tar -C /dev/shm/

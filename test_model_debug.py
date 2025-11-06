@@ -54,7 +54,7 @@ def main():
     if not debug_inputs_path.exists():
         logging.error(f"调试输入文件不存在: {debug_inputs_path}")
         logging.error("请先运行训练脚本生成调试输入:")
-        logging.error("  uv run scripts/train_pytorch.py debug --exp_name pytorch_test")
+        logging.error("  uv run scripts/train_pytorch.py pi05_simpler_debug --exp_name test")
         sys.exit(1)
 
     # 设置设备
