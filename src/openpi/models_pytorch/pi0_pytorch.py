@@ -719,7 +719,7 @@ class PI0Pytorch(nn.Module):
 
         return embs, pad_masks, att_masks, adarms_cond, block_diagonal_ranges
 
-    def forward(self, observation, actions, noise=None, time=None, next_obs=None, embodiment_keys=None) -> Tensor:
+    def forward(self, observation, actions, noise=None, time=None, next_obs=None, base_embodiment_keys=None) -> Tensor:
         """Do a full training forward pass and compute the loss (batch_size x num_steps x num_motors)
 
         Args:

@@ -47,8 +47,8 @@ def _sample_discrete(options: Sequence, batch_size: int, device: torch.device) -
 
 
 # Action scaling (discrete, per-sample, grouped)
-_ACTION_TRANS_SCALES = (0.95, 1.00, 1.05)
-_ACTION_ROT_SCALES = (0.95, 1.00, 1.05)
+_ACTION_TRANS_SCALES = (0.8, 0.9, 1.1, 1.2)
+_ACTION_ROT_SCALES = (0.8, 0.9, 1.1, 1.2)
 
 
 def sample_action_grouped_scales(

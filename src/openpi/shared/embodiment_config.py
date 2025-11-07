@@ -129,6 +129,7 @@ class EmbodimentRegistry:
         self.mode = mode
         # 直接用 tuple 作为 key，性能最优（无需创建对象）
         self.key_to_idx: Dict[tuple, int] = {}
+        self.key_to_idx[0] = 'lerobot-pi0-bridge_widowx_no_geom_aug|act_tx=1|act_rt=1'
 
         logger.info(f"Initialized EmbodimentRegistry in {mode} mode")
 
