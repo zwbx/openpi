@@ -24,7 +24,7 @@
         "type": "python",
         "request": "launch",
         "program": "scripts/train_pytorch.py",
-        "args": ["pi05_simpler_debug", "--exp_name", "test"],
+        "args": ["pi05_simpler_debug", "--exp_name", "training_test"],
         "console": "integratedTerminal",
         "justMyCode": true
     },
