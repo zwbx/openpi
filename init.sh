@@ -93,3 +93,7 @@ cp -r /mnt/hdfs/wenbo/vla/lerobot-pi0-bridge.tar /opt/tiger/pi05_align/
 
 # untar dataset
 tar -xvf lerobot-pi0-bridge.tar -C /dev/shm/
+
+
+ git remote add pub https://github.com/zwbx/openpi.git
+#  git pull pub align_prefix_token

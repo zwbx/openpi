@@ -141,7 +141,7 @@ def main():
     try:
         # Forward pass
         with torch.no_grad():  # 不需要梯度,方便调试
-            losses = model(observation, actions, next_obs=next_obs, embodiment_keys=key)
+            losses = model(observation, actions, next_obs=next_obs, base_embodiment_keys=key)
 
         logging.info("Forward pass 成功!")
         logging.info(f"losses: {losses}")

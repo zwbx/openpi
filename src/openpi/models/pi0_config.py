@@ -78,9 +78,9 @@ class Pi0Config(_model.BaseModelConfig):
 
     # Augmentation probabilities (training)
     # Probability to enable per-sample action augmentation (grouped translation/rotation)
-    action_aug_prob: float = 0.10
+    action_aug_prob: float = 0.20
     # Probability to enable per-sample observation augmentation
-    obs_aug_prob: float = 1.0
+    obs_aug_prob: float = 0.5
 
 
 

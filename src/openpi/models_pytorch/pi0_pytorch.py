@@ -736,9 +736,9 @@ class PI0Pytorch(nn.Module):
 
         # Build final augmentation keys from obs/action metadata and provided embodiment_keys
         embodiment_keys = _preprocessing.build_embodiment_keys(
-            embodiment_keys, obs_aug_metadata, act_aug_metadata
+            base_embodiment_keys, obs_aug_metadata, act_aug_metadata
         )
-
+   
         if noise is None:
             noise = self.sample_noise(actions.shape, actions.device)
 
@@ -817,7 +817,11 @@ class PI0Pytorch(nn.Module):
             e_tok = self.get_embodiment_token(embodiment_keys, batch_size)
             prefix_embs = torch.cat([prefix_embs,e_tok], dim=1)
             prefix_pad_masks = torch.cat([prefix_pad_masks, torch.ones(batch_size, e_tok.shape[1], dtype=torch.bool, device=actions.device)], dim=1)
-            prefix_att_masks = torch.cat([prefix_att_masks, torch.ones(batch_size, e_tok.shape[1], dtype=torch.bool, device=actions.device)], dim=1)
+            # for prefix_att_masks
+            e_mask_template = torch.zeros((e_tok.shape[1],), dtype=torch.int64, device=actions.device)
+            e_mask_template[0] = 1
+            e_mask = e_mask_template.view(1, -1).expand(batch_size, -1)
+            prefix_att_masks = torch.cat([prefix_att_masks.to(dtype=torch.int64), e_mask], dim=1)
 
         if (
             self.paligemma_with_expert.paligemma.language_model.layers[0].self_attn.q_proj.weight.dtype
@@ -1116,7 +1120,7 @@ class PI0Pytorch(nn.Module):
             actions_shape = (bsize, self.config.action_horizon, self.config.action_dim)
             noise = self.sample_noise(actions_shape, device)
 
-        images, img_masks, lang_tokens, lang_masks, state, _ = self._preprocess_observation(observation, train=False)
+        images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(observation, train=False)
 
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
         prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)

@@ -805,7 +805,7 @@ _CONFIGS = [
             use_alignment_expert=True,
             use_peft_prefix_token=True,
             peft_token_bank_size=32,
-            restrict_image_to_language=True,
+            restrict_image_to_language=False,
             discrete_state_input=True,
             pi05=True
         ),
@@ -829,7 +829,14 @@ _CONFIGS = [
     ),
     TrainConfig(
         name="pi05_simpler",
-        model=pi0_config.Pi0Config(pi05=True,discrete_state_input=True),
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            discrete_state_input=False,
+            use_alignment_expert=True,
+            use_peft_prefix_token=True,
+            peft_token_bank_size=1024,
+            restrict_image_to_language=False,
+            pi05=True),
         data=LeRobotSimplerDataConfig(
             repo_id="lerobot-pi0-bridge",
             base_config=DataConfig(
