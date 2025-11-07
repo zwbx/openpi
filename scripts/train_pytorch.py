@@ -556,10 +556,12 @@ def train_loop(config: _config.TrainConfig):
             # Forward pass
             losses = model(observation, actions, next_obs=next_obs, base_embodiment_keys = key)
             # Ensure losses is a tensor and handle different return types
-            if isinstance(losses, list | tuple):
+            if isinstance(losses, list | tuple | dict[str, torch.Tensor]):
                 losses = torch.stack(losses)
             elif not isinstance(losses, torch.Tensor):
                 losses = torch.tensor(losses, device=device, dtype=torch.float32)
+            elif isinstance(losses, dict):
+                losses = torch.stack([losses[k] for k in losses.keys()])
 
             loss = losses.mean()
 
@@ -587,7 +589,7 @@ def train_loop(config: _config.TrainConfig):
             if is_main:
                 infos.append(
                     {
-                        "loss": loss.item(),
+                        **{k: v.item() for k, v in losses.items()},
                         "learning_rate": optim.param_groups[0]["lr"],
                         "grad_norm": float(grad_norm) if isinstance(grad_norm, torch.Tensor) else grad_norm,
                     }

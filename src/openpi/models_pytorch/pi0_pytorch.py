@@ -963,13 +963,15 @@ class PI0Pytorch(nn.Module):
         inverse_dynamics_loss = F.mse_loss(v_t_inv_dynamics, u_t_inv_dynamics, reduction="none")
 
         # Return both action loss and alignment losses
-        alignment_losses = {
+        losses = {
+            'action_loss': action_loss,
             'perception_loss': perception_loss,
             'dynamics_loss': dynamics_loss,
             'inverse_dynamics_loss': inverse_dynamics_loss,
         }
 
-        return action_loss, alignment_losses
+        return losses
+
     def update_online_buffer(self, observation, action):
         """更新 online buffer
 
