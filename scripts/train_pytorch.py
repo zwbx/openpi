@@ -556,12 +556,12 @@ def train_loop(config: _config.TrainConfig):
             # Forward pass
             losses = model(observation, actions, next_obs=next_obs, base_embodiment_keys = key)
             # Ensure losses is a tensor and handle different return types
-            if isinstance(losses, list | tuple | dict[str, torch.Tensor]):
+            if isinstance(losses, (list, tuple)):
                 losses = torch.stack(losses)
-            elif not isinstance(losses, torch.Tensor):
-                losses = torch.tensor(losses, device=device, dtype=torch.float32)
             elif isinstance(losses, dict):
                 losses = torch.stack([losses[k] for k in losses.keys()])
+            elif not isinstance(losses, torch.Tensor):
+                losses = torch.tensor(losses, device=device, dtype=torch.float32)
 
             loss = losses.mean()
 
