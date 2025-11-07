@@ -58,14 +58,12 @@ def sample_action_grouped_scales(
     prob_enable: float = 0.10,
     trans_scales: Sequence[float] = _ACTION_TRANS_SCALES,
     rot_scales: Sequence[float] = _ACTION_ROT_SCALES,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Sample grouped action scales for translation (x,y,z) and rotation (roll,pitch,yaw).
 
     Returns:
         trans_values: [B] selected translation scale values
-        trans_idx:    [B] indices into trans_scales
         rot_values:   [B] selected rotation scale values
-        rot_idx:      [B] indices into rot_scales
         enabled_mask: [B] 1 if augmentation enabled, 0 otherwise
     """
     b = batch_size
@@ -91,22 +89,13 @@ def sample_action_grouped_scales(
     trans_values = trans_vals_all[trans_idx]
     rot_values = rot_vals_all[rot_idx]
 
-    # For disabled samples, force 1.0 and index-of-1.0
-    def _idx_of_one(vals: torch.Tensor) -> int:
-        diffs = torch.abs(vals - 1.0)
-        return int(torch.argmin(diffs).item())
-
-    one_idx_trans = _idx_of_one(trans_vals_all)
-    one_idx_rot = _idx_of_one(rot_vals_all)
-
+    # For disabled samples, force 1.0
     if (enabled_mask == 0).any():
         mask = (enabled_mask == 0)
         trans_values = torch.where(mask, torch.tensor(1.0, device=device), trans_values)
         rot_values = torch.where(mask, torch.tensor(1.0, device=device), rot_values)
-        trans_idx = torch.where(mask, torch.tensor(one_idx_trans, device=device), trans_idx)
-        rot_idx = torch.where(mask, torch.tensor(one_idx_rot, device=device), rot_idx)
 
-    return trans_values, trans_idx, rot_values, rot_idx, enabled_mask
+    return trans_values, rot_values, enabled_mask
 
 
 def apply_action_scale_grouped(
@@ -478,23 +467,14 @@ def preprocess_actions_pytorch(
 
     if action_aug_prob <= 0.0:
         if return_aug_params:
-            # No augmentation: scales are 1.0, use index closest to 1.0
-            trans_vals_all = torch.tensor(list(_ACTION_TRANS_SCALES), device=device, dtype=torch.float32)
-            rot_vals_all = torch.tensor(list(_ACTION_ROT_SCALES), device=device, dtype=torch.float32)
-
-            def _idx_of_one(vals: torch.Tensor) -> int:
-                diffs = torch.abs(vals - 1.0)
-                return int(torch.argmin(diffs).item())
-
-            one_idx_trans = _idx_of_one(trans_vals_all)
-            one_idx_rot = _idx_of_one(rot_vals_all)
+            # No augmentation: scales are 1.0
             params = [{"action": {"transition": 1.0, "rotation": 1.0}} for _ in range(bsz)]
-            suffixes = [f"act_tx={one_idx_trans}|act_rt={one_idx_rot}" for _ in range(bsz)]
+            suffixes = [f"act_tx=1.00|act_rt=1.00" for _ in range(bsz)]
             return actions, {"params": params, "key_suffixes": suffixes}
         return actions
 
     # Sample and apply grouped scales
-    trans_scales, trans_idx, rot_scales, rot_idx, enabled_mask = sample_action_grouped_scales(
+    trans_scales, rot_scales, enabled_mask = sample_action_grouped_scales(
         bsz, device, prob_enable=action_aug_prob
     )
     actions_out = apply_action_scale_grouped(actions, trans_scales, rot_scales)
@@ -505,13 +485,15 @@ def preprocess_actions_pytorch(
     params = []
     suffixes = []
     for i in range(bsz):
+        trans_val = float(trans_scales[i].item())
+        rot_val = float(rot_scales[i].item())
         params.append({
             "action": {
-                "transition": float(trans_scales[i].item()),
-                "rotation": float(rot_scales[i].item()),
+                "transition": trans_val,
+                "rotation": rot_val,
             }
         })
-        suffixes.append(f"act_tx={int(trans_idx[i].item())}|act_rt={int(rot_idx[i].item())}")
+        suffixes.append(f"act_tx={trans_val:.2f}|act_rt={rot_val:.2f}")
 
     return actions_out, {"params": params, "key_suffixes": suffixes}
 
