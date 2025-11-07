@@ -684,9 +684,10 @@ class PI0Pytorch(nn.Module):
         # emb_state = self._apply_checkpoint(self.action_in_proj, sta)
         embs.append(emb_actions)
         embs.append(emb_next_obs)
+        n_img_dyn = emb_next_obs.shape[1]
         pad_masks.append(torch.ones(bsize, 1, dtype=torch.bool, device=device))  # action: 1 token
-        pad_masks.append(torch.ones(bsize, 256, dtype=torch.bool, device=device))  # next_obs: 256 tokens
-        att_masks += [1] + ([0] * 256)  # Dynamics starts new block (1 action + 256 image tokens)
+        pad_masks.append(torch.ones(bsize, n_img_dyn, dtype=torch.bool, device=device))  # next_obs image tokens
+        att_masks += [1] + ([0] * n_img_dyn)  # Dynamics starts new block (1 action + image tokens)
 
         # Task 3: Inverse Dynamics - embed next_obs + noisy_actions
         next_obs_features = next_obs_features.float()
@@ -694,23 +695,31 @@ class PI0Pytorch(nn.Module):
         emb_noisy_actions = self._apply_checkpoint(self.action_in_proj, noisy_actions)[:, None, :]
         embs.append(emb_next_obs_features)
         embs.append(emb_noisy_actions)
-        pad_masks.append(torch.ones(bsize, 256, dtype=torch.bool, device=device))  # next_obs: 256 tokens
+        n_img_inv = emb_next_obs_features.shape[1]
+        pad_masks.append(torch.ones(bsize, n_img_inv, dtype=torch.bool, device=device))  # next_obs image tokens
         pad_masks.append(torch.ones(bsize, 1, dtype=torch.bool, device=device))  # noisy_actions: 1 token
-        att_masks += [1] + ([0] * 256)  # Inverse Dynamics starts new block (256 image tokens + 1 action)
+        att_masks += [1] + ([0] * n_img_inv)  # Inverse Dynamics starts new block (image tokens + 1 action)
 
         # Concatenate
         embs = torch.cat(embs, dim=1)
         pad_masks = torch.cat(pad_masks, dim=1)
-        att_masks = torch.tensor(att_masks, dtype=embs.dtype, device=embs.device)
+        # Use integer mask_ar (0/1) for compatibility with cumsum in make_att_2d_masks
+        att_masks = torch.tensor(att_masks, dtype=torch.int64, device=embs.device)
         att_masks = att_masks[None, :].expand(bsize, len(att_masks))
 
-        # HACK: Manually set block diagonal ranges
-        # Perception: 1 token (0:1), Dynamics: 257 tokens (1:258), Inverse Dynamics: 257 tokens (258:515)
-        block_diagonal_ranges = [(0, 1), (1, 258), (258, 515)]
+        # Compute block diagonal ranges dynamically
+        # Structure: Perception(1), Dynamics(1 + n_img_dyn), Inverse Dynamics(n_img_inv + 1)
+        idx = 0
+        perception_range = (idx, idx + 1)
+        idx = perception_range[1]
+        dynamics_range = (idx, idx + 1 + n_img_dyn)
+        idx = dynamics_range[1]
+        inv_dynamics_range = (idx, idx + n_img_inv + 1)
+        block_diagonal_ranges = [perception_range, dynamics_range, inv_dynamics_range]
 
         return embs, pad_masks, att_masks, adarms_cond, block_diagonal_ranges
 
-    def forward(self, observation, actions, noise=None, time=None, next_obs=None, base_embodiment_keys=None) -> Tensor:
+    def forward(self, observation, actions, noise=None, time=None, next_obs=None, embodiment_keys=None) -> Tensor:
         """Do a full training forward pass and compute the loss (batch_size x num_steps x num_motors)
 
         Args:
@@ -770,7 +779,8 @@ class PI0Pytorch(nn.Module):
             # Task 2: Dynamics (action + noisy_next_obs -> next_obs)
             # TODO compatiblity with diffrent camera view
             image_feat = self.paligemma_with_expert.embed_image(images_next[0])
-            noise_dynamics = self.sample_noise((batch, 256, self.width), actions.device)
+            n_img_next = image_feat.shape[1]
+            noise_dynamics = self.sample_noise((batch, n_img_next, self.width), actions.device)
             
             next_obs_t = time_expanded_iamge_feat * noise_dynamics + (1 - time_expanded_iamge_feat) * image_feat
             u_t_dynamics = noise_dynamics - image_feat
@@ -822,7 +832,6 @@ class PI0Pytorch(nn.Module):
             e_mask_template[0] = 1
             e_mask = e_mask_template.view(1, -1).expand(batch_size, -1)
             prefix_att_masks = torch.cat([prefix_att_masks.to(dtype=torch.int64), e_mask], dim=1)
-
         if (
             self.paligemma_with_expert.paligemma.language_model.layers[0].self_attn.q_proj.weight.dtype
             == torch.bfloat16
@@ -935,21 +944,19 @@ class PI0Pytorch(nn.Module):
         perception_loss = F.mse_loss(v_t_perception, u_t_perception, reduction="none")
 
         # Task 2: Dynamics - predict image features from action + noisy_next_obs
-        # Dynamics range: (1, 258) = action(1 token) + noisy_next_obs(256 tokens)
-        # We want to predict the 256 image tokens, skip the action token
-        dynamics_image_start = dynamics_range[0] + 1  # Skip action token, start from index 2
-        dynamics_image_hidden = alignment_out[:, dynamics_image_start:dynamics_range[1]]  # [batch, 256, hidden_dim]
+        # Dynamics: (action token + image tokens). Predict image tokens; skip the first action token
+        dynamics_image_start = dynamics_range[0] + 1
+        dynamics_image_hidden = alignment_out[:, dynamics_image_start:dynamics_range[1]]  # [batch, n_img_dyn, hidden_dim]
 
         # Apply dynamics head to each image token
-        v_t_dynamics_tokens = self._apply_checkpoint(self.image_feat_out_proj, dynamics_image_hidden)  # [batch, 256, hidden_dim]
+        v_t_dynamics_tokens = self._apply_checkpoint(self.image_feat_out_proj, dynamics_image_hidden)  # [batch, n_img_dyn, hidden_dim]
 
-        # u_t_dynamics is [batch, 256, width], need to match dimensions
+        # u_t_dynamics is [batch, n_img_dyn, width], need to match dimensions
         dynamics_loss = F.mse_loss(v_t_dynamics_tokens, u_t_dynamics, reduction="none")
 
         # Task 3: Inverse Dynamics - predict action from next_obs + noisy_action
-        # Inv_dynamics range: (258, 515) = next_obs(256 tokens) + noisy_action(1 token)
         # We want to predict the action, so use the last token (noisy_action position)
-        inv_dynamics_action_idx = inv_dynamics_range[1] - 1  # Last token (index 514)
+        inv_dynamics_action_idx = inv_dynamics_range[1] - 1
         inv_dynamics_action_hidden = alignment_out[:, inv_dynamics_action_idx]  # [batch, hidden_dim]
 
         v_t_inv_dynamics = self._apply_checkpoint(self.action_out_proj, inv_dynamics_action_hidden)  # [batch, action_dim]
