@@ -47,6 +47,54 @@ import openpi.training.config as _config
 import openpi.training.data_loader as _data
 
 
+def _decode_prompts(observation) -> list[str] | None:
+    """Decode tokenized prompts back to text using the Paligemma tokenizer if available.
+
+    Returns a list of strings (batch) or None if decoding is unavailable.
+    """
+    try:
+        # Lazy import to avoid overhead if unused
+        import sentencepiece as spm  # type: ignore
+        from openpi.models.tokenizer import PaligemmaTokenizer
+
+        tok = PaligemmaTokenizer()
+        sp = tok._tokenizer  # Use underlying sentencepiece processor
+        tokens = observation.tokenized_prompt
+        masks = observation.tokenized_prompt_mask
+        if tokens is None or masks is None:
+            return None
+        tokens_cpu = tokens.detach().cpu().to(torch.int32)
+        masks_cpu = masks.detach().cpu().to(torch.bool)
+        bsz = tokens_cpu.shape[0]
+        texts: list[str] = []
+        for i in range(bsz):
+            valid_ids = tokens_cpu[i][masks_cpu[i]].tolist()
+            try:
+                txt = sp.decode_ids(valid_ids)
+            except Exception:
+                txt = ""
+            texts.append(txt)
+        return texts
+    except Exception:
+        return None
+
+
+def _to_wandb_image(img_tensor: torch.Tensor):
+    """Convert image tensor in [-1,1], shape [C,H,W] or [H,W,C] to wandb.Image."""
+    if img_tensor is None:
+        return None
+    with torch.no_grad():
+        x = img_tensor
+        if x.ndim == 3 and x.shape[0] in (1, 3):
+            # CHW -> HWC
+            x = x.permute(1, 2, 0)
+        x = x.detach().cpu().float()
+        # [-1,1] -> [0,255]
+        x = (x.clamp(-1.0, 1.0) + 1.0) * 0.5
+        x = (x * 255.0).clamp(0, 255).to(torch.uint8).numpy()
+        return wandb.Image(x)
+
+
 def init_logging():
     level_mapping = {"DEBUG": "D", "INFO": "I", "WARNING": "W", "ERROR": "E", "CRITICAL": "C"}
 
@@ -553,14 +601,21 @@ def train_loop(config: _config.TrainConfig):
             #     }, debug_save_path)
             #     logging.info(f"Saved model inputs to {debug_save_path} for debugging")
 
-            # Forward pass
-            losses = model(observation, actions, next_obs=next_obs, base_embodiment_keys = key)
-            # Ensure losses is a tensor and handle different return types
-            if isinstance(losses, (list, tuple)):
-                loss = torch.stack(losses).mean()
-            elif isinstance(losses, dict):
+            # Forward pass (may return (losses, preds))
+            outputs = model(observation, actions, next_obs=next_obs, base_embodiment_keys=key)
+            preds = None
+            if isinstance(outputs, tuple) and len(outputs) == 2:
+                losses, preds = outputs
+            else:
+                losses = outputs
+            # Reduce loss
+            if isinstance(losses, dict):
                 loss = torch.stack([losses[k].mean() for k in losses.keys()]).mean()
-            elif not isinstance(losses, torch.Tensor):
+            elif isinstance(losses, (list, tuple)):
+                loss = torch.stack([x.mean() if isinstance(x, torch.Tensor) else torch.as_tensor(x, device=device).mean() for x in losses]).mean()
+            elif isinstance(losses, torch.Tensor):
+                loss = losses.mean()
+            else:
                 loss = torch.tensor(losses, device=device, dtype=torch.float32).mean()
 
 
@@ -616,7 +671,7 @@ def train_loop(config: _config.TrainConfig):
                     else f"step={global_step} loss={avg_loss:.4f} {', '.join([f'{k}={v:.4f}' for k, v in avg_losses.items()])} lr={avg_lr:.2e} time={elapsed:.1f}s"
                 )
 
-                # Log to wandb
+                # Log to wandb (scalars)
                 if config.wandb_enabled and len(infos) > 0:
                     log_payload = {
                         "loss": avg_loss,
@@ -628,6 +683,77 @@ def train_loop(config: _config.TrainConfig):
                     if avg_grad_norm is not None:
                         log_payload["grad_norm"] = avg_grad_norm
                     wandb.log(log_payload, step=global_step)
+
+                # Visual logging at a separate interval
+                if config.wandb_enabled and getattr(config, 'visual_log_interval', 0) and (global_step % config.visual_log_interval == 0):
+                    try:
+                        # Prepare up to N samples
+                        n = int(getattr(config, 'visual_num_samples', 5))
+                        # Select first camera (main)
+                        cam_key = next(iter(observation.images.keys())) if isinstance(observation.images, dict) else None
+                        if cam_key is None:
+                            # observation.images is already stacked into list in model, fall back to default key
+                            cam_key = 'base_0_rgb'
+                        cur_imgs = observation.images[cam_key][:n]  # [n, C, H, W]
+                        nxt_imgs = None
+                        if next_obs is not None and next_obs.images and cam_key in next_obs.images:
+                            nxt_imgs = next_obs.images[cam_key][:n]
+
+                        # Predictions (if available)
+                        pred_next_images = None
+                        pred_actions = None
+                        pred_state = None
+                        if isinstance(preds, dict):
+                            if preds.get('pred_next_image') is not None:
+                                pred_next_images = preds['pred_next_image'][:n]
+                            if preds.get('pred_actions') is not None:
+                                pred_actions = preds['pred_actions'][:n]
+                            if preds.get('pred_state') is not None:
+                                pred_state = preds['pred_state'][:n]
+
+                        # Decode language
+                        texts = _decode_prompts(observation) or [""] * min(cur_imgs.shape[0], n)
+
+                        # Actions/State ground truth
+                        gt_actions = actions[:n]
+                        gt_state = observation.state[:n]
+
+                        # Build WandB table
+                        table = wandb.Table(columns=[
+                            "current_image", "next_image_gt", "next_image_pred",
+                            "language", "action_gt", "action_pred", "state_gt", "state_pred"
+                        ])
+
+                        rows = min(n, cur_imgs.shape[0])
+                        for i in range(rows):
+                            cur_img_wb = _to_wandb_image(cur_imgs[i])
+                            nxt_img_wb = _to_wandb_image(nxt_imgs[i]) if nxt_imgs is not None else None
+                            pred_img_wb = _to_wandb_image(pred_next_images[i]) if pred_next_images is not None else None
+
+                            # Format vectors: action first 7 dims, state first 8 dims
+                            act_gt_str = ", ".join([f"{v:.3f}" for v in gt_actions[i, 0, :7].detach().cpu().tolist()]) if gt_actions is not None else ""
+                            act_pred_str = ""
+                            if pred_actions is not None:
+                                act_pred_str = ", ".join([f"{v:.3f}" for v in pred_actions[i, 0, :7].detach().cpu().tolist()])
+                            state_gt_str = ", ".join([f"{v:.3f}" for v in observation.state[i, :8].detach().cpu().tolist()])
+                            state_pred_str = ""
+                            if pred_state is not None:
+                                state_pred_str = ", ".join([f"{v:.3f}" for v in pred_state[i, :8].detach().cpu().tolist()])
+
+                            table.add_data(
+                                cur_img_wb,
+                                nxt_img_wb,
+                                pred_img_wb,
+                                texts[i] if i < len(texts) else "",
+                                act_gt_str,
+                                act_pred_str,
+                                state_gt_str,
+                                state_pred_str,
+                            )
+
+                        wandb.log({"visuals": table}, step=global_step)
+                    except Exception as e:
+                        logging.warning(f"Visual logging failed: {e}")
 
                 start_time = time.time()
                 infos = []  # Reset stats collection

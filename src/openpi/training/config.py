@@ -559,6 +559,11 @@ class TrainConfig:
     # If true, will enable wandb logging.
     wandb_enabled: bool = True
 
+    # Visualization logging interval (in steps). 0 disables visual logging.
+    visual_log_interval: int = 500
+    # Number of samples to log per visualization step.
+    visual_num_samples: int = 5
+
     # Used to pass metadata to the policy server.
     policy_metadata: dict[str, Any] | None = None
 

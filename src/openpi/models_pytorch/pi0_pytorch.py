@@ -232,8 +232,11 @@ class PI0Pytorch(nn.Module):
         self.state_in_proj = nn.Linear(32, alignment_expert_config.width)
         self.state_out_proj = nn.Linear(alignment_expert_config.width, 32)
 
+        # Feature-space projection (for next-observation features)
         self.image_feat_in_proj = nn.Linear(self.width, alignment_expert_config.width)
-        self.image_feat_out_proj = nn.Linear(alignment_expert_config.width, self.width)
+        # RGB-space projection (for next image pixel prediction)
+        self.rgb_in_proj = nn.Linear(3, alignment_expert_config.width)
+        self.rgb_out_proj = nn.Linear(alignment_expert_config.width, 3)
 
         # PEFT prefix token bank (E-Token Bank) using nn.Embedding
         self.use_peft_prefix_token = bool(getattr(config, 'use_peft_prefix_token', False))
@@ -320,6 +323,22 @@ class PI0Pytorch(nn.Module):
                 raise ValueError(msg)
         except ImportError:
             raise ValueError(msg) from None
+
+    def _vision_grid_size(self) -> int:
+        """Derive vision token grid size g from vision config (image_size // patch_size).
+
+        Falls back to 14 for 224/16 if fields missing.
+        """
+        try:
+            vcfg = self.paligemma_with_expert.paligemma.config.vision_config
+            image_size = getattr(vcfg, 'image_size', 224)
+            if isinstance(image_size, (tuple, list)):
+                image_size = int(image_size[0])
+            patch = int(getattr(vcfg, 'patch_size', 16))
+            g = int(image_size) // int(patch)
+            return max(1, g)
+        except Exception:
+            return 14
 
     def get_embodiment_token(self, embodiment_keys, batch_size: int):
         """
@@ -678,9 +697,13 @@ class PI0Pytorch(nn.Module):
         pad_masks.append(torch.ones(bsize, 1, dtype=torch.bool, device=device))
         att_masks += [1]  # Perception starts new block
 
-        # Task 2: Dynamics - embed actions + noisy_next_obs_features (&next_state)
+        # Task 2: Dynamics - embed actions + noisy next_obs tokens
+        # Support both feature-space tokens (width-dim) and RGB tokens (3-dim)
         emb_actions = self._apply_checkpoint(self.action_in_proj, actions)[:, None, :]
-        emb_next_obs = self._apply_checkpoint(self.image_feat_in_proj, noisy_next_obs_features)
+        if noisy_next_obs_features.shape[-1] == 3:
+            emb_next_obs = self._apply_checkpoint(self.rgb_in_proj, noisy_next_obs_features)
+        else:
+            emb_next_obs = self._apply_checkpoint(self.image_feat_in_proj, noisy_next_obs_features)
         # emb_state = self._apply_checkpoint(self.action_in_proj, sta)
         embs.append(emb_actions)
         embs.append(emb_next_obs)
@@ -691,6 +714,7 @@ class PI0Pytorch(nn.Module):
 
         # Task 3: Inverse Dynamics - embed next_obs + noisy_actions
         next_obs_features = next_obs_features.float()
+        # Inverse dynamics always uses feature-space embedding of next_obs_features
         emb_next_obs_features = self._apply_checkpoint(self.image_feat_in_proj, next_obs_features)
         emb_noisy_actions = self._apply_checkpoint(self.action_in_proj, noisy_actions)[:, None, :]
         embs.append(emb_next_obs_features)
@@ -776,14 +800,22 @@ class PI0Pytorch(nn.Module):
             state_t = time_expanded_state * noise_perception + (1 - time_expanded_state) * state
             u_t_perception = noise_perception - state
 
-            # Task 2: Dynamics (action + noisy_next_obs -> next_obs)
-            # TODO compatiblity with diffrent camera view
-            image_feat = self.paligemma_with_expert.embed_image(images_next[0])
-            n_img_next = image_feat.shape[1]
-            noise_dynamics = self.sample_noise((batch, n_img_next, self.width), actions.device)
-            
-            next_obs_t = time_expanded_iamge_feat * noise_dynamics + (1 - time_expanded_iamge_feat) * image_feat
-            u_t_dynamics = noise_dynamics - image_feat
+            # Task 2: Dynamics (action + noisy_next_obs -> next image pixels)
+            # Use first camera as main view
+            next_img_main = images_next[0]  # [B, C, H, W] in [-1, 1]
+            b_img, c_img, h_img, w_img = next_img_main.shape
+            # Also get feature tokens for inverse dynamics task
+            image_feat = self.paligemma_with_expert.embed_image(next_img_main)
+            # Derive grid size from vision config: g = image_size // patch_size
+            g = self._vision_grid_size()
+            n_rgb_tokens = g * g
+            # Downsample GT next image to g x g grid and flatten to tokens
+            next_img_grid = F.adaptive_avg_pool2d(next_img_main, output_size=(g, g))  # [B, C, g, g]
+            next_img_tokens = next_img_grid.permute(0, 2, 3, 1).reshape(b_img, n_rgb_tokens, c_img)  # [B, n, 3]
+            # Diffusion noise/targets in RGB token space
+            noise_dynamics_rgb = self.sample_noise((batch, n_rgb_tokens, 3), actions.device)
+            next_obs_t = time_expanded_iamge_feat * noise_dynamics_rgb + (1 - time_expanded_iamge_feat) * next_img_tokens
+            u_t_dynamics = noise_dynamics_rgb - next_img_tokens
 
             # Task 3: Inverse Dynamics (next_obs + noisy_action -> action)
             action_one_step = actions[:, 0, :]
@@ -943,16 +975,19 @@ class PI0Pytorch(nn.Module):
         v_t_perception = self._apply_checkpoint(self.state_out_proj, perception_hidden)
         perception_loss = F.mse_loss(v_t_perception, u_t_perception, reduction="none")
 
-        # Task 2: Dynamics - predict image features from action + noisy_next_obs
+        # Task 2: Dynamics - predict next image pixels from action + noisy_next_obs (RGB tokens)
         # Dynamics: (action token + image tokens). Predict image tokens; skip the first action token
         dynamics_image_start = dynamics_range[0] + 1
         dynamics_image_hidden = alignment_out[:, dynamics_image_start:dynamics_range[1]]  # [batch, n_img_dyn, hidden_dim]
 
-        # Apply dynamics head to each image token
-        v_t_dynamics_tokens = self._apply_checkpoint(self.image_feat_out_proj, dynamics_image_hidden)  # [batch, n_img_dyn, hidden_dim]
+        # Apply dynamics head to each image token (RGB prediction per token)
+        v_t_dynamics_tokens = self._apply_checkpoint(self.rgb_out_proj, dynamics_image_hidden)  # [batch, n_img_dyn, 3]
 
-        # u_t_dynamics is [batch, n_img_dyn, width], need to match dimensions
+        # u_t_dynamics is [batch, n_img_dyn, 3]
         dynamics_loss = F.mse_loss(v_t_dynamics_tokens, u_t_dynamics, reduction="none")
+
+        # Also form predictions for logging
+        pred_img_tokens = noise_dynamics_rgb - v_t_dynamics_tokens  # [B, n, 3]
 
         # Task 3: Inverse Dynamics - predict action from next_obs + noisy_action
         # We want to predict the action, so use the last token (noisy_action position)
@@ -962,7 +997,7 @@ class PI0Pytorch(nn.Module):
         v_t_inv_dynamics = self._apply_checkpoint(self.action_out_proj, inv_dynamics_action_hidden)  # [batch, action_dim]
         inverse_dynamics_loss = F.mse_loss(v_t_inv_dynamics, u_t_inv_dynamics, reduction="none")
 
-        # Return both action loss and alignment losses
+        # Return both loss dict and prediction dict
         losses = {
             'action_loss': action_loss,
             'perception_loss': perception_loss,
@@ -970,7 +1005,27 @@ class PI0Pytorch(nn.Module):
             'inverse_dynamics_loss': inverse_dynamics_loss,
         }
 
-        return losses
+        # Predictions
+        pred_actions = noise - v_t  # [B, T, D]
+        pred_state = noise_perception - v_t_perception  # [B, state_dim]
+        # Reconstruct low-res grid and upsample to original resolution
+        pred_next_image = None
+        try:
+            b_tok, n_tok, _ = pred_img_tokens.shape
+            g_side = int(math.sqrt(n_tok))
+            pred_grid = pred_img_tokens.reshape(b_tok, g_side, g_side, 3).permute(0, 3, 1, 2).contiguous()
+            # Use next image resolution from earlier block
+            pred_next_image = F.interpolate(pred_grid, size=(h_img, w_img), mode="bilinear", align_corners=False)
+        except Exception:
+            pred_next_image = None
+
+        preds = {
+            'pred_actions': pred_actions,
+            'pred_state': pred_state,
+            'pred_next_image': pred_next_image,
+        }
+
+        return (losses, preds)
 
     def update_online_buffer(self, observation, action):
         """更新 online buffer
