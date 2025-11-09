@@ -726,6 +726,8 @@ def train_loop(config: _config.TrainConfig):
                                     aug_next_obs_images = an[cam_key][:n]
                                 elif isinstance(an, torch.Tensor):
                                     aug_next_obs_images = an[:n]
+                            if preds.get('embodiment_keys') is not None:
+                                embodiment_keys = preds['embodiment_keys'][:n]
 
                         # Decode language
                         texts = _decode_prompts(observation) or [""] * min(cur_imgs.shape[0], n)
@@ -736,7 +738,7 @@ def train_loop(config: _config.TrainConfig):
 
                         # Build WandB table
                         table = wandb.Table(columns=[
-                            "cur_img", "cur_img_aug", "nxt_img", "nxt_img_aug", "nxt_img_pred",
+                            "cur_img", "cur_img_aug", "nxt_img", "nxt_img_aug", "nxt_img_pred", "embodiment_key",
                             "language", "action_gt", "action_pred", "state_gt", "state_pred"
                         ])
 
@@ -764,6 +766,7 @@ def train_loop(config: _config.TrainConfig):
                                 nxt_img_wb,
                                 nxt_img_aug_wb,
                                 pred_img_wb,
+                                embodiment_keys[i],
                                 texts[i] if i < len(texts) else "",
                                 act_gt_str,
                                 act_pred_str,

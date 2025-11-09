@@ -1057,13 +1057,14 @@ class PI0Pytorch(nn.Module):
             'pred_next_image': pred_next_image,
             'aug_obs_images': aug_obs_images,
             'aug_next_obs_images': aug_next_obs_images,
+            'embodiment_keys': embodiment_keys,
         }
 
         return (losses, preds)
 
     def update_online_buffer(self, observation, action):
         """更新 online buffer
-
+ 
         将执行动作后的交互数据存入 buffer，供后续 align 使用
 
         Args:
