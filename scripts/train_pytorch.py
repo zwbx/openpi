@@ -601,11 +601,18 @@ def train_loop(config: _config.TrainConfig):
             #     }, debug_save_path)
             #     logging.info(f"Saved model inputs to {debug_save_path} for debugging")
 
-            # Forward pass (may return (losses, preds))
-            outputs = model(observation, actions, next_obs=next_obs, base_embodiment_keys=key)
+            # Forward pass (may return (losses, preds[, viz]))
+            want_viz = bool(config.wandb_enabled) and is_main and getattr(config, 'visual_log_interval', 0) and (global_step % getattr(config, 'visual_log_interval', 0) == 0)
+            outputs = model(observation, actions, next_obs=next_obs, base_embodiment_keys=key, return_viz=want_viz)
             preds = None
-            if isinstance(outputs, tuple) and len(outputs) == 2:
-                losses, preds = outputs
+            viz = None
+            if isinstance(outputs, tuple):
+                if len(outputs) == 3 and isinstance(outputs[2], dict):
+                    losses, preds, viz = outputs
+                elif len(outputs) == 2 and isinstance(outputs[1], dict):
+                    losses, preds = outputs
+                else:
+                    losses = outputs[0]
             else:
                 losses = outputs
             # Reduce loss
@@ -641,21 +648,23 @@ def train_loop(config: _config.TrainConfig):
 
             # Collect stats
             if is_main:
-                infos.append(
-                    {
-                        "loss": loss.item(),
-                        **{k: v.mean().item() for k, v in losses.items()},
-                        "learning_rate": optim.param_groups[0]["lr"],
-                        "grad_norm": float(grad_norm) if isinstance(grad_norm, torch.Tensor) else grad_norm,
-                    }
-                )
+                payload = {
+                    "loss": loss.item(),
+                    "learning_rate": optim.param_groups[0]["lr"],
+                    "grad_norm": float(grad_norm) if isinstance(grad_norm, torch.Tensor) else grad_norm,
+                }
+                if isinstance(losses, dict):
+                    payload.update({k: v.mean().item() for k, v in losses.items()})
+                infos.append(payload)
 
             if is_main and (global_step % config.log_interval == 0):
                 elapsed = time.time() - start_time
 
                 # Average stats over log interval
                 avg_loss = sum(info["loss"] for info in infos) / len(infos)
-                avg_losses = {k: sum(info[k] for info in infos) / len(infos) for k in losses.keys()}
+                avg_losses = {}
+                if isinstance(losses, dict):
+                    avg_losses = {k: sum(info[k] for info in infos if k in info) / len(infos) for k in losses.keys()}
                 avg_lr = sum(info["learning_rate"] for info in infos) / len(infos)
 
                 avg_grad_norm = None
@@ -699,6 +708,17 @@ def train_loop(config: _config.TrainConfig):
                         if next_obs is not None and next_obs.images and cam_key in next_obs.images:
                             nxt_imgs = next_obs.images[cam_key][:n]
 
+                        # Non-augmented images (if provided by forward)
+                        cur_imgs_noaug = None
+                        nxt_imgs_noaug = None
+                        if isinstance(viz, dict):
+                            obs_noaug = viz.get('obs_noaug')
+                            nxt_noaug = viz.get('next_obs_noaug')
+                            if isinstance(obs_noaug, dict) and cam_key in obs_noaug:
+                                cur_imgs_noaug = obs_noaug[cam_key][:n]
+                            if isinstance(nxt_noaug, dict) and cam_key in nxt_noaug:
+                                nxt_imgs_noaug = nxt_noaug[cam_key][:n]
+
                         # Predictions (if available)
                         pred_next_images = None
                         pred_actions = None
@@ -720,14 +740,17 @@ def train_loop(config: _config.TrainConfig):
 
                         # Build WandB table
                         table = wandb.Table(columns=[
-                            "current_image", "next_image_gt", "next_image_pred",
+                            "current_image", "current_image_noaug",
+                            "next_image_gt", "next_image_noaug", "next_image_pred",
                             "language", "action_gt", "action_pred", "state_gt", "state_pred"
                         ])
 
                         rows = min(n, cur_imgs.shape[0])
                         for i in range(rows):
                             cur_img_wb = _to_wandb_image(cur_imgs[i])
+                            cur_img_noaug_wb = _to_wandb_image(cur_imgs_noaug[i]) if cur_imgs_noaug is not None else None
                             nxt_img_wb = _to_wandb_image(nxt_imgs[i]) if nxt_imgs is not None else None
+                            nxt_img_noaug_wb = _to_wandb_image(nxt_imgs_noaug[i]) if nxt_imgs_noaug is not None else None
                             pred_img_wb = _to_wandb_image(pred_next_images[i]) if pred_next_images is not None else None
 
                             # Format vectors: action first 7 dims, state first 8 dims
@@ -742,7 +765,9 @@ def train_loop(config: _config.TrainConfig):
 
                             table.add_data(
                                 cur_img_wb,
+                                cur_img_noaug_wb,
                                 nxt_img_wb,
+                                nxt_img_noaug_wb,
                                 pred_img_wb,
                                 texts[i] if i < len(texts) else "",
                                 act_gt_str,
