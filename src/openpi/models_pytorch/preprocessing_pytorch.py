@@ -174,7 +174,7 @@ def _boxes_from_scale_pos(scales: torch.Tensor, pos_indices: torch.Tensor) -> to
 def _apply_color_presets(x: torch.Tensor, preset_indices: torch.Tensor) -> torch.Tensor:
     # x: [B, C, H, W], 取 0..1
     b = x.shape[0]
-    out = x
+    out = x.clone()  # 使用深拷贝避免修改原始tensor
     for i in range(b):
         p = int(preset_indices[i].item())
         preset = _COLOR_PRESETS[p]
@@ -327,6 +327,9 @@ def preprocess_observation_pytorch(
                 flip_vals = torch.tensor(flip_vals_list, device=device, dtype=torch.float32)
                 cj_idx = torch.tensor(cj_idx_list, device=device, dtype=torch.long)
 
+                # 保存原图，用于no-op样本
+                image_orig = image.clone()
+
                 # 裁剪 + 缩放
                 boxes = _boxes_from_scale_pos(crop_scales, crop_pos_idx)
                 image_aug = KT.crop_and_resize(image, boxes, IMAGE_RESOLUTION)
@@ -341,7 +344,23 @@ def preprocess_observation_pytorch(
                     image_aug[flip_mask] = torch.flip(image_aug[flip_mask], dims=(3,))
 
                 # 颜色扰动（preset）
-                image = _apply_color_presets(image_aug, cj_idx)
+                image_aug = _apply_color_presets(image_aug, cj_idx)
+
+                # 检测每个样本是否为no-op，如果是则使用原图
+                # no-op定义：crop_scale=1.0, pos=C(0), rotation=0, flip=0, cj_preset=0
+                is_noop_mask = (
+                    (crop_scales == 1.0) &
+                    (crop_pos_idx == 0) &
+                    (rot_degs == 0.0) &
+                    (flip_vals == 0.0) &
+                    (cj_idx == 0)
+                ).view(b, 1, 1, 1)
+
+                # 对于no-op样本使用原图，避免Kornia插值引入的数值误差
+                image = torch.where(is_noop_mask, image_orig, image_aug)
+
+                # 调试：检查颜色变换后的值域
+                logger.debug(f"[use_aug_params] After color presets - view={key}, min={image.min().item():.4f}, max={image.max().item():.4f}, mean={image.mean().item():.4f}, noop_count={is_noop_mask.sum().item()}/{b}")
 
                 # 记录参数与 key 组件（直接使用传入的参数）
                 if return_aug_params:
@@ -415,6 +434,9 @@ def preprocess_observation_pytorch(
                 # 颜色扰动（preset）
                 image_aug = _apply_color_presets(image_aug, cj_idx)
 
+                # 调试：检查颜色变换后的值域
+                logger.debug(f"[random_sampling] After color presets - view={key}, min={image_aug.min().item():.4f}, max={image_aug.max().item():.4f}, mean={image_aug.mean().item():.4f}")
+
                 # 按概率选择是否采用增广图像
                 if enable_mask is not None:
                     mask = enable_mask.view(b, 1, 1, 1)
@@ -457,6 +479,9 @@ def preprocess_observation_pytorch(
             image = image.permute(0, 2, 3, 1)
             image = torch.clamp(image, 0, 1)
             image = image * 2.0 - 1.0
+
+            # 调试：检查转换回[-1,1]后的值域
+            logger.debug(f"After convert to [-1,1] - view={key}, min={image.min().item():.4f}, max={image.max().item():.4f}, mean={image.mean().item():.4f}")
 
         # Convert back to [B, C, H, W] format if it was originally channels-first
         # if is_channels_first:
