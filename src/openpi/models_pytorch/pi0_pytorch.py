@@ -2,7 +2,8 @@ import logging
 import math
 import dataclasses
 
- 
+import typing
+from typing import Tuple
 import torch
 from torch import Tensor
 from torch import nn
@@ -14,6 +15,7 @@ import openpi.models_pytorch.preprocessing_pytorch as _preprocessing
 from openpi.shared.embodiment_config import EmbodimentRegistry, BaseEmbodimentConfig, EmbodimentKey
 import random
 import time
+import numpy
 
 
 # ============================================================================
@@ -313,8 +315,6 @@ class PI0Pytorch(nn.Module):
         # 将在第一次 align() 调用时初始化
         self.align_optimizer = None
 
-        # Visualization payload is returned directly from forward when requested
-
         msg = "transformers_replace is not installed correctly. Please install it with `uv pip install transformers==4.53.2` and `cp -r ./src/openpi/models_pytorch/transformers_replace/* .venv/lib/python3.11/site-packages/transformers/`."
         try:
             from transformers.models.siglip import check
@@ -416,14 +416,10 @@ class PI0Pytorch(nn.Module):
             actions: Input actions
             return_aug_params: If True, return augmentation parameters from Kornia
         """
-        return _preprocessing.preprocess_actions_pytorch(
-            actions,
-            return_aug_params=return_aug_params,
-            action_aug_prob=self.config.action_aug_prob,
-        )
+        return _preprocessing.preprocess_actions_pytorch(actions, return_aug_params=return_aug_params, action_aug_prob=self.config.action_aug_prob)
 
 
-    def _preprocess_observation(self, observation, *, train=True, return_aug_params=False, aug_params_override=None, return_noaug_images=False):
+    def _preprocess_observation(self, observation, *, train=True, return_aug_params=False):
         """Helper method to preprocess observation.
 
         Args:
@@ -440,12 +436,7 @@ class PI0Pytorch(nn.Module):
         # Read observation augmentation probability from config only
         obs_prob = float(getattr(self.config, 'obs_aug_prob', 1.0))
         result = _preprocessing.preprocess_observation_pytorch(
-            observation,
-            train=train,
-            return_aug_params=return_aug_params,
-            aug_enable_prob=obs_prob,
-            aug_params_override=aug_params_override,
-            return_noaug_images=return_noaug_images,
+            observation, train=train, return_aug_params=return_aug_params, aug_enable_prob=obs_prob
         )
 
         if return_aug_params:
@@ -752,7 +743,7 @@ class PI0Pytorch(nn.Module):
 
         return embs, pad_masks, att_masks, adarms_cond, block_diagonal_ranges
 
-    def forward(self, observation, actions, noise=None, time=None, next_obs=None, base_embodiment_keys=None, return_viz: bool = False) -> Tensor:
+    def forward(self, observation, actions, noise=None, time=None, next_obs=None, base_embodiment_keys=None) -> Tensor:
         """Do a full training forward pass and compute the loss (batch_size x num_steps x num_motors)
 
         Args:
@@ -771,7 +762,7 @@ class PI0Pytorch(nn.Module):
         batch_size = actions.shape[0]
         # Preprocess observation and collect augmentation metadata
         (images, img_masks, lang_tokens, lang_masks, state), obs_aug_metadata = self._preprocess_observation(
-            observation, train=True, return_aug_params=True, return_noaug_images=True
+            observation, train=True, return_aug_params=True
         )
         # Action augmentation: grouped scale via preprocessing util
         actions, act_aug_metadata = self._preprocess_actions(actions, return_aug_params=True)
@@ -797,20 +788,8 @@ class PI0Pytorch(nn.Module):
         use_alignment_expert = getattr(self.config, 'use_alignment_expert', False) and self.training
 
         # Alignment Expert: prepare diffusion inputs for three tasks
-        # Prepare optional viz payload early
-        viz_payload = {'obs_noaug': obs_aug_metadata.get('images_no_aug') if isinstance(obs_aug_metadata, dict) else None}
-
         if use_alignment_expert and next_obs is not None:
-            # Apply the exact same augmentation parameters to next_obs for consistency
-            (images_next, img_masks_next, lang_tokens_next, lang_masks_next, state_next), next_obs_aug_metadata = self._preprocess_observation(
-                next_obs,
-                train=True,
-                return_aug_params=True,
-                aug_params_override=obs_aug_metadata.get("params") if isinstance(obs_aug_metadata, dict) else None,
-                return_noaug_images=True,
-            )
-            # Add next_obs no-aug images to viz payload
-            viz_payload['next_obs_noaug'] = next_obs_aug_metadata.get('images_no_aug') if isinstance(next_obs_aug_metadata, dict) else None
+            images_next, img_masks_next, lang_tokens_next, lang_masks_next, state_next = self._preprocess_observation(next_obs, train=True)
             time_expanded_state = time[:, None]  # [batch_size, 1]
             time_expanded_iamge_feat = time[:, None, None]  # [batch_size, 1, 1]
             time_expanded_action = time[:, None]  # [batch_size, 1]
@@ -975,11 +954,7 @@ class PI0Pytorch(nn.Module):
 
         # If alignment expert is not enabled or alignment_out is None, return action loss only
         if alignment_out is None:
-            losses = { 'action_loss': action_loss }
-            preds: dict[str, torch.Tensor | None] = {}
-            if return_viz:
-                return (losses, preds, viz_payload)
-            return (losses, preds)
+            return action_loss
 
         # Compute alignment losses
         alignment_out = alignment_out.to(dtype=torch.float32)
@@ -1050,8 +1025,6 @@ class PI0Pytorch(nn.Module):
             'pred_next_image': pred_next_image,
         }
 
-        if return_viz:
-            return (losses, preds, viz_payload)
         return (losses, preds)
 
     def update_online_buffer(self, observation, action):

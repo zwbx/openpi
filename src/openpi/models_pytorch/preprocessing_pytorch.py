@@ -194,6 +194,38 @@ def _format_geom_key(scale: float, pos_idx: int, rot_deg: float, flip: int) -> s
     return f"crop=s{scale:.2f}@{pos_letter}|rot={int(rot_deg):+d}|flip={flip}"
 
 
+def build_embodiment_keys(base_keys: list[tuple], obs_aug_metadata: dict, act_aug_metadata: dict | None = None):
+    """Build final embodiment_keys by appending augmentation key per sample.
+
+    Requirements:
+    - base_keys must be a list of tuples, length == batch size.
+    - obs_aug_metadata["keys"]: list[str], non-wrist geometric parts concatenated and sorted by view
+    - act_aug_metadata["keys"]: list[str], e.g., "act_sc=1"
+    """
+    img_keys = obs_aug_metadata.get("keys", []) if isinstance(obs_aug_metadata, dict) else []
+    act_keys = act_aug_metadata.get("keys", []) if isinstance(act_aug_metadata, dict) else []
+    batch_size = len(img_keys) if img_keys else (len(act_keys) if act_keys else 0)
+
+    if not isinstance(base_keys, list):
+        raise TypeError("base_keys must be a list of tuples with length == batch size")
+    if len(base_keys) != batch_size:
+        raise ValueError(f"embodiment_keys length {len(base_keys)} != batch_size {batch_size}")
+    for i, bk in enumerate(base_keys):
+        if not isinstance(bk, tuple):
+            raise TypeError(f"base_keys[{i}] must be a tuple, got {type(bk)}")
+
+    final_keys = []
+    for i in range(batch_size):
+        parts = []
+        if img_keys:
+            parts.append(img_keys[i])
+        if act_keys:
+            parts.append(act_keys[i])
+        aug_key = "|".join([p for p in parts if p]) if parts else ""
+        final_keys.append(base_keys[i] + (aug_key,))
+    return final_keys
+
+
 # 以上定义用于“参数驱动 + 函数式变换”的离散增广，不再依赖 Kornia 的随机管线
 
 
@@ -206,8 +238,6 @@ def preprocess_observation_pytorch(
     image_resolution: tuple[int, int] = IMAGE_RESOLUTION,
     return_aug_params: bool = False,  # New parameter to return augmentation parameters
     aug_enable_prob: float | None = None,  # Probability to enable obs augmentation per-sample
-    aug_params_override: list[dict[str, dict]] | None = None,  # Use exact per-sample, per-view params
-    return_noaug_images: bool = False,  # Also return images without augmentation for visualization
 ):
     """Preprocess observation with discrete, parameter-driven per-sample augmentation.
 
@@ -240,7 +270,6 @@ def preprocess_observation_pytorch(
     per_sample_view_params: list[dict[str, dict[str, float | int]]] | None = None
     per_sample_key_components: list[list[str]] | None = None
 
-    images_no_aug: dict[str, torch.Tensor] | None = {} if (train and return_aug_params and return_noaug_images) else None
     for key in image_keys:
         image = observation.images[key]
         is_wrist_view = "wrist" in key
@@ -264,14 +293,12 @@ def preprocess_observation_pytorch(
             b = image.shape[0]
             device = image.device
             enable_mask = None
-            # If override is provided, we do not sample enable mask here; descriptors control no-op vs aug
-            if aug_params_override is None:
-                if aug_enable_prob is not None and 0.0 <= float(aug_enable_prob) < 1.0:
-                    enable_mask = (torch.rand((b,), device=device) < float(aug_enable_prob))
-                elif aug_enable_prob is not None and float(aug_enable_prob) >= 1.0:
-                    enable_mask = torch.ones((b,), dtype=torch.bool, device=device)
-                elif aug_enable_prob is not None and float(aug_enable_prob) <= 0.0:
-                    enable_mask = torch.zeros((b,), dtype=torch.bool, device=device)
+            if aug_enable_prob is not None and 0.0 <= float(aug_enable_prob) < 1.0:
+                enable_mask = (torch.rand((b,), device=device) < float(aug_enable_prob))
+            elif aug_enable_prob is not None and float(aug_enable_prob) >= 1.0:
+                enable_mask = torch.ones((b,), dtype=torch.bool, device=device)
+            elif aug_enable_prob is not None and float(aug_enable_prob) <= 0.0:
+                enable_mask = torch.zeros((b,), dtype=torch.bool, device=device)
 
             # 采样离散参数（腕部：固定几何，不采样几何）
             if is_wrist_view:
@@ -280,48 +307,15 @@ def preprocess_observation_pytorch(
                 rot_degs = torch.zeros((b,), device=device)
                 flip_vals = torch.zeros((b,), device=device)
             else:
-                if aug_params_override is not None:
-                    # Build tensors from provided per-sample descriptors
-                    # Default no-op if descriptor missing
-                    crop_scales_list = []
-                    crop_pos_idx_list = []
-                    rot_degs_list = []
-                    flip_vals_list = []
-                    cj_idx_list = []
-                    pos_to_idx = {"C": 0, "U": 1, "D": 2, "L": 3, "R": 4}
-                    for i in range(b):
-                        desc = aug_params_override[i].get(key, None)
-                        if desc is None:
-                            # no-op
-                            crop_scales_list.append(1.0)
-                            crop_pos_idx_list.append(0)
-                            rot_degs_list.append(0.0)
-                            flip_vals_list.append(0)
-                            cj_idx_list.append(0)
-                        else:
-                            crop_scales_list.append(float(desc.get("crop_scale", 1.0)))
-                            crop_pos_idx_list.append(int(pos_to_idx.get(str(desc.get("crop_pos", "C")), 0)))
-                            rot_degs_list.append(float(desc.get("rotation_deg", 0.0)))
-                            flip_vals_list.append(int(desc.get("flip", 0)))
-                            cj_idx_list.append(int(desc.get("cj_preset", 0)))
-                    crop_scales = torch.tensor(crop_scales_list, device=device, dtype=torch.float32)
-                    crop_pos_idx = torch.tensor(crop_pos_idx_list, device=device, dtype=torch.long)
-                    rot_degs = torch.tensor(rot_degs_list, device=device, dtype=torch.float32)
-                    flip_vals = torch.tensor(flip_vals_list, device=device, dtype=torch.float32)
-                    # set color below via cj_idx_list
-                else:
-                    crop_scales, _ = _sample_discrete(_CROP_SCALES, b, device)
-                    _, crop_pos_idx = _sample_discrete(range(len(_CROP_POS)), b, device)
-                    rot_degs, _ = _sample_discrete(_ROT_DEGS, b, device)
-                    flip_vals, _ = _sample_discrete(_FLIP, b, device)
+                crop_scales, _ = _sample_discrete(_CROP_SCALES, b, device)
+                _, crop_pos_idx = _sample_discrete(range(len(_CROP_POS)), b, device)
+                rot_degs, _ = _sample_discrete(_ROT_DEGS, b, device)
+                flip_vals, _ = _sample_discrete(_FLIP, b, device)
 
             # 颜色 preset（所有视角都可）
-            if aug_params_override is not None:
-                cj_idx = torch.tensor(cj_idx_list, device=device, dtype=torch.long)
-            else:
-                _, cj_idx = _sample_discrete(range(len(_COLOR_PRESETS)), b, device)
+            _, cj_idx = _sample_discrete(range(len(_COLOR_PRESETS)), b, device)
 
-            # 保存原图（0..1, CHW），用于按概率禁用增广及可视化
+            # 保存原图，用于按概率禁用增广
             image_orig = image
 
             # 裁剪 + 缩放
@@ -347,10 +341,6 @@ def preprocess_observation_pytorch(
             else:
                 image = image_aug
 
-            # 记录未增广图像（转换回 [-1,1]，并保持 [B,C,H,W]）
-            if images_no_aug is not None:
-                images_no_aug[key] = torch.clamp(image_orig, 0.0, 1.0) * 2.0 - 1.0
-
             # 记录参数与 key 组件
             if return_aug_params:
                 if per_sample_view_params is None:
@@ -358,49 +348,29 @@ def preprocess_observation_pytorch(
                     per_sample_key_components = [[] for _ in range(b)]
 
                 for i in range(b):
-                    if aug_params_override is not None:
-                        # Reuse provided descriptors to ensure exact match
-                        descriptor = aug_params_override[i].get(key, {
+                    # 如果该样本未启用增广，则记录 no-op 参数并不加入 key 组件
+                    if enable_mask is not None and not bool(enable_mask[i].item()):
+                        descriptor = {
                             "crop_scale": 1.0,
                             "crop_pos": "C",
                             "rotation_deg": 0.0,
                             "flip": 0,
                             "cj_preset": 0,
-                        })
+                        }
                         per_sample_view_params[i][key] = descriptor
-                        # Add key component only for non-wrist views and when effective aug is not no-op
-                        if not is_wrist_view:
-                            comp = _format_geom_key(
-                                float(descriptor["crop_scale"]),
-                                int(pos_to_idx.get(str(descriptor.get("crop_pos", "C")), 0)),
-                                float(descriptor["rotation_deg"]),
-                                int(descriptor["flip"]),
-                            )
-                            per_sample_key_components[i].append(f"{key}:{comp}")
                     else:
-                        # 如果该样本未启用增广，则记录 no-op 参数并不加入 key 组件
-                        if enable_mask is not None and not bool(enable_mask[i].item()):
-                            descriptor = {
-                                "crop_scale": 1.0,
-                                "crop_pos": "C",
-                                "rotation_deg": 0.0,
-                                "flip": 0,
-                                "cj_preset": 0,
-                            }
-                            per_sample_view_params[i][key] = descriptor
-                        else:
-                            descriptor = {
-                                "crop_scale": float(crop_scales[i].item()),
-                                "crop_pos": _CROP_POS[int(crop_pos_idx[i].item())],
-                                "rotation_deg": float(rot_degs[i].item()),
-                                "flip": int(flip_vals[i].item()),
-                                "cj_preset": int(cj_idx[i].item()),
-                            }
-                            per_sample_view_params[i][key] = descriptor
-                            if not is_wrist_view:
-                                per_sample_key_components[i].append(
-                                    f"{key}:{_format_geom_key(descriptor['crop_scale'], int(crop_pos_idx[i].item()), descriptor['rotation_deg'], descriptor['flip'])}"
-                                )
+                        descriptor = {
+                            "crop_scale": float(crop_scales[i].item()),
+                            "crop_pos": _CROP_POS[int(crop_pos_idx[i].item())],
+                            "rotation_deg": float(rot_degs[i].item()),
+                            "flip": int(flip_vals[i].item()),
+                            "cj_preset": int(cj_idx[i].item()),
+                        }
+                        per_sample_view_params[i][key] = descriptor
+                        if not is_wrist_view:
+                            per_sample_key_components[i].append(
+                                f"{key}:{_format_geom_key(descriptor['crop_scale'], int(crop_pos_idx[i].item()), descriptor['rotation_deg'], descriptor['flip'])}"
+                            )
 
             # 回到 [B,H,W,C]，并转回 [-1,1]
             image = image.permute(0, 2, 3, 1)
@@ -463,8 +433,6 @@ def preprocess_observation_pytorch(
             "params": per_sample_view_params,
             "keys": keys,
         }
-        if images_no_aug is not None:
-            aug_metadata["images_no_aug"] = images_no_aug
         return processed_obs, aug_metadata
 
     return processed_obs
