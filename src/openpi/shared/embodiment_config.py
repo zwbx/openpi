@@ -172,9 +172,9 @@ class EmbodimentRegistry:
         new_idx = len(self.key_to_idx)
         self.key_to_idx[key] = new_idx
 
-        logger.info(
-            f"[EmbodimentRegistry] Registered new embodiment:\n"
-            f"  W Index: {new_idx}\n"
-            f"  Key: {key}"
-        )
+        # logger.info(
+        #     f"[EmbodimentRegistry] Registered new embodiment:\n"
+        #     f"  W Index: {new_idx}\n"
+        #     f"  Key: {key}"
+        # )
         return new_idx

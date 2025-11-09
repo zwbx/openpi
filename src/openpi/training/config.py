@@ -810,7 +810,7 @@ _CONFIGS = [
             discrete_state_input=False,
             use_alignment_expert=True,
             use_peft_prefix_token=True,
-            peft_token_bank_size=32,
+            peft_token_bank_size=1024,
             restrict_image_to_language=False,
             pi05=True
         ),
@@ -827,8 +827,9 @@ _CONFIGS = [
         save_interval=100,
         overwrite=True,
         exp_name="debug",
-        num_train_steps=10,
-        wandb_enabled=False,
+        num_train_steps=200,
+        visual_log_interval=10,
+        wandb_enabled=True,
         num_workers=0,
         pytorch_weight_path=None,  # 不加载权重进行测试
     ),
@@ -836,11 +837,7 @@ _CONFIGS = [
         name="pi05_simpler",
         model=pi0_config.Pi0Config(
             pi05=True,
-            discrete_state_input=False,
-            use_alignment_expert=True,
-            use_peft_prefix_token=True,
-            peft_token_bank_size=1024,
-            restrict_image_to_language=False),
+            discrete_state_input=True),
         data=LeRobotSimplerDataConfig(
             repo_id="lerobot-pi0-bridge",
             base_config=DataConfig(
@@ -849,7 +846,7 @@ _CONFIGS = [
                 use_quantile_norm=True,
             ),
         ),
-        batch_size=256,
+        batch_size=128,
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=1_000,
             peak_lr=5e-5,
@@ -867,8 +864,11 @@ _CONFIGS = [
         name="pi05_simpler_zscore_align",
         model=pi0_config.Pi0Config(
             pi05=True,
-            discrete_state_input=True,
+            discrete_state_input=False,
             use_alignment_expert=True,
+            use_peft_prefix_token=True,
+            peft_token_bank_size=1024,
+            restrict_image_to_language=False,
         ),
         data=LeRobotSimplerDataConfig(
             repo_id="lerobot-pi0-bridge",
@@ -876,9 +876,10 @@ _CONFIGS = [
                 prompt_from_task=True,
                 dataset_root="/dev/shm/lerobot-pi0-bridge",
                 use_quantile_norm=False,
+                max_num_episodes=1000,
             ),
         ),
-        batch_size=256,
+        batch_size=64,
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=1_000,
             peak_lr=5e-5,
@@ -887,10 +888,11 @@ _CONFIGS = [
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         ema_decay=0.999,
-        # pytorch_weight_path="/dev/shm/pi05_base_pytorch",
-        pytorch_weight_path="/mnt/hdfs/wenbo/vla/pi05_simpler_ckpt/95000/",
-        num_train_steps=100_000,
-        num_workers=32,
+        pytorch_weight_path="/dev/shm/pi05_base_pytorch",
+        # pytorch_weight_path="/mnt/hdfs/wenbo/vla/pi05_simpler_ckpt/95000/",
+        exp_name="pi05_simpler_zscore_align",
+        num_train_steps=30_000,
+        num_workers=8,
     ),
     TrainConfig(
         name="pi05_simpler_zscore",

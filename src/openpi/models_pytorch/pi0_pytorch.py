@@ -248,10 +248,9 @@ class PI0Pytorch(nn.Module):
             # Initialize token bank using nn.Embedding
             # num_embeddings: bank_size (max number of embodiments)
             # embedding_dim: num_tokens * hidden_dim (flattened)
-            embedding_dim = self.peft_num_tokens * action_expert_config.width
             self.prefix_token_bank = nn.Embedding(
                 num_embeddings=self.peft_token_bank_size,
-                embedding_dim=embedding_dim
+                embedding_dim=paligemma_config.width
             )
 
             # Initialize weights
@@ -261,7 +260,7 @@ class PI0Pytorch(nn.Module):
                 nn.init.zeros_(self.prefix_token_bank.weight)
 
             # Store shape info for reshaping
-            self.token_hidden_dim = action_expert_config.width
+            self.token_hidden_dim = paligemma_config.width
 
             # Initialize Embodiment Registry
             embodiment_mode = getattr(config, 'embodiment_registry_mode', 'auto')

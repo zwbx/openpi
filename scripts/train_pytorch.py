@@ -42,6 +42,7 @@ import wandb
 
 import openpi.models.pi0_config
 import openpi.models_pytorch.pi0_pytorch
+from openpi.shared.embodiment_config import EmbodimentKey
 import openpi.shared.normalize as _normalize
 import openpi.training.config as _config
 import openpi.training.data_loader as _data
@@ -412,7 +413,7 @@ def train_loop(config: _config.TrainConfig):
         sample_data_loader = _data.create_data_loader(config, framework="pytorch", shuffle=False)
         sample_batch = next(iter(sample_data_loader))
         # Convert observation and actions to torch tensors
-        observation, actions, _ = sample_batch  # Ignore next_obs for sample visualization
+        observation, actions, next_observation, base_embodiment_keys = sample_batch  # Ignore next_obs for sample visualization
         sample_batch = observation.to_dict()
         sample_batch["actions"] = actions
 
