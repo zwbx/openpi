@@ -238,6 +238,7 @@ def preprocess_observation_pytorch(
     image_resolution: tuple[int, int] = IMAGE_RESOLUTION,
     return_aug_params: bool = False,  # New parameter to return augmentation parameters
     aug_enable_prob: float | None = None,  # Probability to enable obs augmentation per-sample
+    use_aug_params: list[dict[str, dict[str, float | int]]] | None = None,  # Force per-sample, per-view params
 ):
     """Preprocess observation with discrete, parameter-driven per-sample augmentation.
 
@@ -292,73 +293,63 @@ def preprocess_observation_pytorch(
 
             b = image.shape[0]
             device = image.device
-            enable_mask = None
-            if aug_enable_prob is not None and 0.0 <= float(aug_enable_prob) < 1.0:
-                enable_mask = (torch.rand((b,), device=device) < float(aug_enable_prob))
-            elif aug_enable_prob is not None and float(aug_enable_prob) >= 1.0:
-                enable_mask = torch.ones((b,), dtype=torch.bool, device=device)
-            elif aug_enable_prob is not None and float(aug_enable_prob) <= 0.0:
-                enable_mask = torch.zeros((b,), dtype=torch.bool, device=device)
-
-            # 采样离散参数（腕部：固定几何，不采样几何）
-            if is_wrist_view:
-                crop_scales = torch.full((b,), 1.0, device=device)
-                crop_pos_idx = torch.zeros((b,), dtype=torch.long, device=device)  # C
-                rot_degs = torch.zeros((b,), device=device)
-                flip_vals = torch.zeros((b,), device=device)
-            else:
-                crop_scales, _ = _sample_discrete(_CROP_SCALES, b, device)
-                _, crop_pos_idx = _sample_discrete(range(len(_CROP_POS)), b, device)
-                rot_degs, _ = _sample_discrete(_ROT_DEGS, b, device)
-                flip_vals, _ = _sample_discrete(_FLIP, b, device)
-
-            # 颜色 preset（所有视角都可）
-            _, cj_idx = _sample_discrete(range(len(_COLOR_PRESETS)), b, device)
-
-            # 保存原图，用于按概率禁用增广
-            image_orig = image
-
-            # 裁剪 + 缩放
-            boxes = _boxes_from_scale_pos(crop_scales, crop_pos_idx)
-            image_aug = KT.crop_and_resize(image, boxes, IMAGE_RESOLUTION)
-
-            # 旋转（度 -> 弧度）
-            angles_rad = rot_degs * torch.pi / 180.0
-            image_aug = KT.rotate(image_aug, angles_rad)
-
-            # 水平翻转（按掩码）
-            flip_mask = flip_vals > 0.5
-            if flip_mask.any():
-                image_aug[flip_mask] = torch.flip(image_aug[flip_mask], dims=(3,))
-
-            # 颜色扰动（preset）
-            image_aug = _apply_color_presets(image_aug, cj_idx)
-
-            # 按概率选择是否采用增广图像
-            if enable_mask is not None:
-                mask = enable_mask.view(b, 1, 1, 1)
-                image = torch.where(mask, image_aug, image_orig)
-            else:
-                image = image_aug
-
-            # 记录参数与 key 组件
-            if return_aug_params:
-                if per_sample_view_params is None:
-                    per_sample_view_params = [{} for _ in range(b)]
-                    per_sample_key_components = [[] for _ in range(b)]
+            if use_aug_params is not None:
+                # 使用给定的离散参数，确保与第一次调用的增广一致
+                # 从 use_aug_params 中抽取该视角的 per-sample 参数
+                # 构建张量参数以应用几何和颜色变换
+                crop_scales_list = []
+                crop_pos_idx_list = []
+                rot_degs_list = []
+                flip_vals_list = []
+                cj_idx_list = []
 
                 for i in range(b):
-                    # 如果该样本未启用增广，则记录 no-op 参数并不加入 key 组件
-                    if enable_mask is not None and not bool(enable_mask[i].item()):
-                        descriptor = {
-                            "crop_scale": 1.0,
-                            "crop_pos": "C",
-                            "rotation_deg": 0.0,
-                            "flip": 0,
-                            "cj_preset": 0,
-                        }
-                        per_sample_view_params[i][key] = descriptor
-                    else:
+                    # 每个样本一个 dict：{view_key -> descriptor}
+                    sample_params = use_aug_params[i] if i < len(use_aug_params) else {}
+                    desc = sample_params.get(key)
+                    if desc is None:
+                        # 该视角缺省时，使用 no-op
+                        desc = {"crop_scale": 1.0, "crop_pos": "C", "rotation_deg": 0.0, "flip": 0, "cj_preset": 0}
+
+                    # wrist 视角：按照原始策略应固定几何，这里直接尊重 desc 值（第一次已按该策略生成）
+                    crop_scales_list.append(float(desc.get("crop_scale", 1.0)))
+                    pos = desc.get("crop_pos", "C")
+                    # 将字符位置映射到索引
+                    pos_idx = _CROP_POS.index(pos) if isinstance(pos, str) else int(pos)
+                    crop_pos_idx_list.append(pos_idx)
+                    rot_degs_list.append(float(desc.get("rotation_deg", 0.0)))
+                    flip_vals_list.append(int(desc.get("flip", 0)))
+                    cj_idx_list.append(int(desc.get("cj_preset", 0)))
+
+                crop_scales = torch.tensor(crop_scales_list, device=device, dtype=torch.float32)
+                crop_pos_idx = torch.tensor(crop_pos_idx_list, device=device, dtype=torch.long)
+                rot_degs = torch.tensor(rot_degs_list, device=device, dtype=torch.float32)
+                flip_vals = torch.tensor(flip_vals_list, device=device, dtype=torch.float32)
+                cj_idx = torch.tensor(cj_idx_list, device=device, dtype=torch.long)
+
+                # 裁剪 + 缩放
+                boxes = _boxes_from_scale_pos(crop_scales, crop_pos_idx)
+                image_aug = KT.crop_and_resize(image, boxes, IMAGE_RESOLUTION)
+
+                # 旋转（度 -> 弧度）
+                angles_rad = rot_degs * torch.pi / 180.0
+                image_aug = KT.rotate(image_aug, angles_rad)
+
+                # 水平翻转（按掩码）
+                flip_mask = flip_vals > 0.5
+                if flip_mask.any():
+                    image_aug[flip_mask] = torch.flip(image_aug[flip_mask], dims=(3,))
+
+                # 颜色扰动（preset）
+                image = _apply_color_presets(image_aug, cj_idx)
+
+                # 记录参数与 key 组件（直接使用传入的参数）
+                if return_aug_params:
+                    if per_sample_view_params is None:
+                        per_sample_view_params = [{} for _ in range(b)]
+                        per_sample_key_components = [[] for _ in range(b)]
+
+                    for i in range(b):
                         descriptor = {
                             "crop_scale": float(crop_scales[i].item()),
                             "crop_pos": _CROP_POS[int(crop_pos_idx[i].item())],
@@ -367,10 +358,100 @@ def preprocess_observation_pytorch(
                             "cj_preset": int(cj_idx[i].item()),
                         }
                         per_sample_view_params[i][key] = descriptor
+                        # 仅当非腕部视角且存在非平凡几何时拼装 key；
+                        # 这里遵循第一次的策略：如果是 no-op 则不加入组件
                         if not is_wrist_view:
-                            per_sample_key_components[i].append(
-                                f"{key}:{_format_geom_key(descriptor['crop_scale'], int(crop_pos_idx[i].item()), descriptor['rotation_deg'], descriptor['flip'])}"
+                            is_noop = (
+                                descriptor["crop_scale"] == 1.0 and
+                                descriptor["crop_pos"] == "C" and
+                                int(descriptor["rotation_deg"]) == 0 and
+                                descriptor["flip"] == 0
                             )
+                            if not is_noop:
+                                per_sample_key_components[i].append(
+                                    f"{key}:{_format_geom_key(descriptor['crop_scale'], int(crop_pos_idx[i].item()), descriptor['rotation_deg'], descriptor['flip'])}"
+                                )
+            else:
+                # 原有路径：随机采样参数并按概率启用
+                enable_mask = None
+                if aug_enable_prob is not None and 0.0 <= float(aug_enable_prob) < 1.0:
+                    enable_mask = (torch.rand((b,), device=device) < float(aug_enable_prob))
+                elif aug_enable_prob is not None and float(aug_enable_prob) >= 1.0:
+                    enable_mask = torch.ones((b,), dtype=torch.bool, device=device)
+                elif aug_enable_prob is not None and float(aug_enable_prob) <= 0.0:
+                    enable_mask = torch.zeros((b,), dtype=torch.bool, device=device)
+
+                # 采样离散参数（腕部：固定几何，不采样几何）
+                if is_wrist_view:
+                    crop_scales = torch.full((b,), 1.0, device=device)
+                    crop_pos_idx = torch.zeros((b,), dtype=torch.long, device=device)  # C
+                    rot_degs = torch.zeros((b,), device=device)
+                    flip_vals = torch.zeros((b,), device=device)
+                else:
+                    crop_scales, _ = _sample_discrete(_CROP_SCALES, b, device)
+                    _, crop_pos_idx = _sample_discrete(range(len(_CROP_POS)), b, device)
+                    rot_degs, _ = _sample_discrete(_ROT_DEGS, b, device)
+                    flip_vals, _ = _sample_discrete(_FLIP, b, device)
+
+                # 颜色 preset（所有视角都可）
+                _, cj_idx = _sample_discrete(range(len(_COLOR_PRESETS)), b, device)
+
+                # 保存原图，用于按概率禁用增广
+                image_orig = image
+
+                # 裁剪 + 缩放
+                boxes = _boxes_from_scale_pos(crop_scales, crop_pos_idx)
+                image_aug = KT.crop_and_resize(image, boxes, IMAGE_RESOLUTION)
+
+                # 旋转（度 -> 弧度）
+                angles_rad = rot_degs * torch.pi / 180.0
+                image_aug = KT.rotate(image_aug, angles_rad)
+
+                # 水平翻转（按掩码）
+                flip_mask = flip_vals > 0.5
+                if flip_mask.any():
+                    image_aug[flip_mask] = torch.flip(image_aug[flip_mask], dims=(3,))
+
+                # 颜色扰动（preset）
+                image_aug = _apply_color_presets(image_aug, cj_idx)
+
+                # 按概率选择是否采用增广图像
+                if enable_mask is not None:
+                    mask = enable_mask.view(b, 1, 1, 1)
+                    image = torch.where(mask, image_aug, image_orig)
+                else:
+                    image = image_aug
+
+                # 记录参数与 key 组件
+                if return_aug_params:
+                    if per_sample_view_params is None:
+                        per_sample_view_params = [{} for _ in range(b)]
+                        per_sample_key_components = [[] for _ in range(b)]
+
+                    for i in range(b):
+                        # 如果该样本未启用增广，则记录 no-op 参数并不加入 key 组件
+                        if enable_mask is not None and not bool(enable_mask[i].item()):
+                            descriptor = {
+                                "crop_scale": 1.0,
+                                "crop_pos": "C",
+                                "rotation_deg": 0.0,
+                                "flip": 0,
+                                "cj_preset": 0,
+                            }
+                            per_sample_view_params[i][key] = descriptor
+                        else:
+                            descriptor = {
+                                "crop_scale": float(crop_scales[i].item()),
+                                "crop_pos": _CROP_POS[int(crop_pos_idx[i].item())],
+                                "rotation_deg": float(rot_degs[i].item()),
+                                "flip": int(flip_vals[i].item()),
+                                "cj_preset": int(cj_idx[i].item()),
+                            }
+                            per_sample_view_params[i][key] = descriptor
+                            if not is_wrist_view:
+                                per_sample_key_components[i].append(
+                                    f"{key}:{_format_geom_key(descriptor['crop_scale'], int(crop_pos_idx[i].item()), descriptor['rotation_deg'], descriptor['flip'])}"
+                                )
 
             # 回到 [B,H,W,C]，并转回 [-1,1]
             image = image.permute(0, 2, 3, 1)

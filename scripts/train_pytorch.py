@@ -699,10 +699,12 @@ def train_loop(config: _config.TrainConfig):
                         if next_obs is not None and next_obs.images and cam_key in next_obs.images:
                             nxt_imgs = next_obs.images[cam_key][:n]
 
-                        # Predictions (if available)
+                        # Outputs (if available)
                         pred_next_images = None
                         pred_actions = None
                         pred_state = None
+                        aug_obs_images = None
+                        aug_next_obs_images = None
                         if isinstance(preds, dict):
                             if preds.get('pred_next_image') is not None:
                                 pred_next_images = preds['pred_next_image'][:n]
@@ -710,6 +712,10 @@ def train_loop(config: _config.TrainConfig):
                                 pred_actions = preds['pred_actions'][:n]
                             if preds.get('pred_state') is not None:
                                 pred_state = preds['pred_state'][:n]
+                            if preds.get('aug_obs_images') is not None:
+                                aug_obs_images = preds['aug_obs_images'][:n]
+                            if preds.get('aug_next_obs_images') is not None:
+                                aug_next_obs_images = preds['aug_next_obs_images'][:n]
 
                         # Decode language
                         texts = _decode_prompts(observation) or [""] * min(cur_imgs.shape[0], n)
@@ -720,14 +726,16 @@ def train_loop(config: _config.TrainConfig):
 
                         # Build WandB table
                         table = wandb.Table(columns=[
-                            "current_image", "next_image_gt", "next_image_pred",
+                            "cur_img", "cur_img_aug", "nxt_img", "nxt_img_aug", "nxt_img_pred",
                             "language", "action_gt", "action_pred", "state_gt", "state_pred"
                         ])
 
                         rows = min(n, cur_imgs.shape[0])
                         for i in range(rows):
                             cur_img_wb = _to_wandb_image(cur_imgs[i])
+                            cur_img_aug_wb = _to_wandb_image(aug_obs_images[i]) if aug_obs_images is not None else None
                             nxt_img_wb = _to_wandb_image(nxt_imgs[i]) if nxt_imgs is not None else None
+                            nxt_img_aug_wb = _to_wandb_image(aug_next_obs_images[i]) if aug_next_obs_images is not None else None
                             pred_img_wb = _to_wandb_image(pred_next_images[i]) if pred_next_images is not None else None
 
                             # Format vectors: action first 7 dims, state first 8 dims
@@ -742,7 +750,9 @@ def train_loop(config: _config.TrainConfig):
 
                             table.add_data(
                                 cur_img_wb,
+                                cur_img_aug_wb,
                                 nxt_img_wb,
+                                nxt_img_aug_wb,
                                 pred_img_wb,
                                 texts[i] if i < len(texts) else "",
                                 act_gt_str,

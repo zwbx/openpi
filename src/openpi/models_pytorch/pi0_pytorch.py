@@ -419,7 +419,7 @@ class PI0Pytorch(nn.Module):
         return _preprocessing.preprocess_actions_pytorch(actions, return_aug_params=return_aug_params, action_aug_prob=self.config.action_aug_prob)
 
 
-    def _preprocess_observation(self, observation, *, train=True, return_aug_params=False):
+    def _preprocess_observation(self, observation, *, train=True, return_aug_params=False, use_aug_params=None):
         """Helper method to preprocess observation.
 
         Args:
@@ -436,18 +436,23 @@ class PI0Pytorch(nn.Module):
         # Read observation augmentation probability from config only
         obs_prob = float(getattr(self.config, 'obs_aug_prob', 1.0))
         result = _preprocessing.preprocess_observation_pytorch(
-            observation, train=train, return_aug_params=return_aug_params, aug_enable_prob=obs_prob
+            observation,
+            train=train,
+            return_aug_params=return_aug_params,
+            aug_enable_prob=obs_prob,
+            use_aug_params=use_aug_params,
         )
 
         if return_aug_params:
             observation, aug_params = result
-            return (
+            packed = (
                 list(observation.images.values()),
                 list(observation.image_masks.values()),
                 observation.tokenized_prompt,
                 observation.tokenized_prompt_mask,
                 observation.state,
-            ), aug_params
+            )
+            return packed, aug_params
         else:
             observation = result
             return (
@@ -744,20 +749,23 @@ class PI0Pytorch(nn.Module):
         return embs, pad_masks, att_masks, adarms_cond, block_diagonal_ranges
 
     def forward(self, observation, actions, noise=None, time=None, next_obs=None, base_embodiment_keys=None) -> Tensor:
-        """Do a full training forward pass and compute the loss (batch_size x num_steps x num_motors)
+        """Do a full training forward pass and compute losses and preds.
 
         Args:
             observation: Input observations
             actions: Ground truth actions [batch_size, action_horizon, action_dim]
             noise: Optional noise for diffusion
             time: Optional timestep for diffusion
-            next_obs: Optional next observation features for alignment expert [batch_size, feature_dim]
-                     (e.g., DINO features from obs_t+1)
+            next_obs: Optional next observation for alignment expert
             embodiment_keys: Optional EmbodimentKey or List[EmbodimentKey] for Token Bank
 
         Returns:
-            If use_alignment_expert=False: action_loss tensor
-            If use_alignment_expert=True: (action_loss, alignment_losses dict)
+            If use_alignment_expert=False:
+                action_loss tensor of shape [B, T, D]
+            If use_alignment_expert=True:
+                (losses: dict[str, Tensor], preds: dict[str, Any]) where preds includes
+                'pred_actions', 'pred_state', 'pred_next_image', and augmented images
+                'aug_obs_images' and 'aug_next_obs_images'.
         """
         batch_size = actions.shape[0]
         # Preprocess observation and collect augmentation metadata
@@ -789,7 +797,13 @@ class PI0Pytorch(nn.Module):
 
         # Alignment Expert: prepare diffusion inputs for three tasks
         if use_alignment_expert and next_obs is not None:
-            images_next, img_masks_next, lang_tokens_next, lang_masks_next, state_next = self._preprocess_observation(next_obs, train=True)
+            # 第二次预处理 next_obs：强制使用与第一次相同的增广参数（只做一次处理，不重复增广）
+            (images_next, img_masks_next, lang_tokens_next, lang_masks_next, state_next) = \
+                self._preprocess_observation(
+                    next_obs,
+                    train=True,
+                    use_aug_params=obs_aug_metadata.get('params'),
+                )
             time_expanded_state = time[:, None]  # [batch_size, 1]
             time_expanded_iamge_feat = time[:, None, None]  # [batch_size, 1, 1]
             time_expanded_action = time[:, None]  # [batch_size, 1]
@@ -911,6 +925,8 @@ class PI0Pytorch(nn.Module):
         # Prepare attention masks
         att_2d_masks_4d = self._prepare_attention_masks_4d(att_2d_masks)
 
+        # 简化：不在此处做 wandb 日志记录，外部可用 outputs 中返回的图像自行记录
+
         # Apply gradient checkpointing if enabled
         def forward_func(prefix_embs, suffix_embs, alignment_suffix_embs, att_2d_masks_4d, position_ids, adarms_cond, alignment_adarms_cond):
             # Prepare inputs_embeds: [prefix, action_suffix, alignment_suffix (optional)]
@@ -997,7 +1013,7 @@ class PI0Pytorch(nn.Module):
         v_t_inv_dynamics = self._apply_checkpoint(self.action_out_proj, inv_dynamics_action_hidden)  # [batch, action_dim]
         inverse_dynamics_loss = F.mse_loss(v_t_inv_dynamics, u_t_inv_dynamics, reduction="none")
 
-        # Return both loss dict and prediction dict
+        # Return both loss dict and outputs dict
         losses = {
             'action_loss': action_loss,
             'perception_loss': perception_loss,
@@ -1019,10 +1035,29 @@ class PI0Pytorch(nn.Module):
         except Exception:
             pred_next_image = None
 
+        # Augmented images for inspection: build mapping from keys -> tensors
+        try:
+            aug_obs_images = None
+            if hasattr(observation, 'images') and isinstance(observation.images, dict):
+                obs_keys = list(observation.images.keys())
+                aug_obs_images = {k: v for k, v in zip(obs_keys, images, strict=False)}
+        except Exception:
+            aug_obs_images = None
+
+        aug_next_obs_images = None
+        try:
+            if next_obs is not None and hasattr(next_obs, 'images') and isinstance(next_obs.images, dict) and 'images_next' in locals():
+                nxt_keys = list(next_obs.images.keys())
+                aug_next_obs_images = {k: v for k, v in zip(nxt_keys, images_next, strict=False)}
+        except Exception:
+            aug_next_obs_images = None
+
         preds = {
             'pred_actions': pred_actions,
             'pred_state': pred_state,
             'pred_next_image': pred_next_image,
+            'aug_obs_images': aug_obs_images,
+            'aug_next_obs_images': aug_next_obs_images,
         }
 
         return (losses, preds)
