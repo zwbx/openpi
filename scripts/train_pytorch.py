@@ -712,10 +712,19 @@ def train_loop(config: _config.TrainConfig):
                                 pred_actions = preds['pred_actions'][:n]
                             if preds.get('pred_state') is not None:
                                 pred_state = preds['pred_state'][:n]
+                            # Handle augmented images possibly being dicts keyed by camera
                             if preds.get('aug_obs_images') is not None:
-                                aug_obs_images = preds['aug_obs_images'][:n]
+                                ao = preds['aug_obs_images']
+                                if isinstance(ao, dict) and cam_key in ao:
+                                    aug_obs_images = ao[cam_key][:n]
+                                elif isinstance(ao, torch.Tensor):
+                                    aug_obs_images = ao[:n]
                             if preds.get('aug_next_obs_images') is not None:
-                                aug_next_obs_images = preds['aug_next_obs_images'][:n]
+                                an = preds['aug_next_obs_images']
+                                if isinstance(an, dict) and cam_key in an:
+                                    aug_next_obs_images = an[cam_key][:n]
+                                elif isinstance(an, torch.Tensor):
+                                    aug_next_obs_images = an[:n]
 
                         # Decode language
                         texts = _decode_prompts(observation) or [""] * min(cur_imgs.shape[0], n)
@@ -763,6 +772,8 @@ def train_loop(config: _config.TrainConfig):
 
                         wandb.log({"visuals": table}, step=global_step)
                     except Exception as e:
+                        import traceback
+                        traceback.print_exc()
                         logging.warning(f"Visual logging failed: {e}")
 
                 start_time = time.time()
