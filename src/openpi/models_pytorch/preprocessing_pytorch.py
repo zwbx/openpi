@@ -1,5 +1,7 @@
 from collections.abc import Sequence
 import logging
+import os
+import torchvision.utils as vutils
 
 import torch
 import kornia.geometry.transform as KT
@@ -30,16 +32,16 @@ _FLIP = (0,)
 
 # 颜色预设（有限档位，便于离散回放）；索引即 preset id
 _COLOR_PRESETS = (
-    {"brightness": 1.0, "contrast": 1.0, "saturation": 1.0, "hue": 0.0},  # p0: no-op
-    {"brightness": 1.10, "contrast": 1.00, "saturation": 1.00, "hue": 0.00},
-    {"brightness": 0.90, "contrast": 1.00, "saturation": 1.00, "hue": 0.00},
-    {"brightness": 1.00, "contrast": 1.10, "saturation": 1.00, "hue": 0.00},
-    {"brightness": 1.00, "contrast": 0.90, "saturation": 1.00, "hue": 0.00},
-    {"brightness": 1.00, "contrast": 1.00, "saturation": 1.10, "hue": 0.00},
-    {"brightness": 1.00, "contrast": 1.00, "saturation": 0.90, "hue": 0.00},
-    {"brightness": 1.00, "contrast": 1.00, "saturation": 1.00, "hue": 0.05},
+    {"brightness": 0.0, "contrast": 1.0, "saturation": 1.0, "hue": 0.00},  # p0: no-op
+    {"brightness": 0.1, "contrast": 1.00, "saturation": 1.00, "hue": 0.0},
+    {"brightness": -0.1, "contrast": 1.00, "saturation": 1.00, "hue": 0.00},
+    {"brightness": 0.0, "contrast": 1.10, "saturation": 1.00, "hue": 0.00},
+    {"brightness": 0.0, "contrast": 0.90, "saturation": 1.00, "hue": 0.00},
+    {"brightness": 0.0, "contrast": 1.00, "saturation": 1.10, "hue": 0.00},
+    {"brightness": 0.0, "contrast": 1.00, "saturation": 0.90, "hue": 0.00},
+    {"brightness": 0.0, "contrast": 1.00, "saturation": 1.00, "hue": 0.1},
+    {"brightness": 0.0, "contrast": 1.00, "saturation": 1.00, "hue": -0.1},
 )
-
 
 def _sample_discrete(options: Sequence, batch_size: int, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
     idx = torch.randint(0, len(options), (batch_size,), device=device)
@@ -285,6 +287,9 @@ def preprocess_observation_pytorch(
         if image.shape[1:3] != image_resolution:
             logger.info(f"Resizing image {key} from {image.shape[1:3]} to {image_resolution}")
             image = image_tools.resize_with_pad_torch(image, *image_resolution)
+            # Save resized image for debugging
+            if debug_save_images:
+                _save_debug_image(image, "02_resized", key, debug_dir="/opt/tiger/pi05_align/debug")
 
         if train:
             # 转 0..1，并使用 channels-first 以便几何函数
@@ -332,16 +337,16 @@ def preprocess_observation_pytorch(
 
                 # 裁剪 + 缩放
                 boxes = _boxes_from_scale_pos(crop_scales, crop_pos_idx)
-                image_aug = KT.crop_and_resize(image, boxes, IMAGE_RESOLUTION)
+                image_aug = KT.crop_and_resize(image, boxes * 224, IMAGE_RESOLUTION)
 
                 # 旋转（度 -> 弧度）
-                angles_rad = rot_degs * torch.pi / 180.0
-                image_aug = KT.rotate(image_aug, angles_rad)
+                # import pdb; pdb.set_trace()
+                image_aug = KT.rotate(image_aug, rot_degs)
 
                 # 水平翻转（按掩码）
                 flip_mask = flip_vals > 0.5
                 if flip_mask.any():
-                    image_aug[flip_mask] = torch.flip(image_aug[flip_mask], dims=(3,))
+                    image_aug = torch.flip(image_aug, dims=(3,))
 
                 # 颜色扰动（preset）
                 image_aug = _apply_color_presets(image_aug, cj_idx)
@@ -420,16 +425,15 @@ def preprocess_observation_pytorch(
 
                 # 裁剪 + 缩放
                 boxes = _boxes_from_scale_pos(crop_scales, crop_pos_idx)
-                image_aug = KT.crop_and_resize(image, boxes, IMAGE_RESOLUTION)
+                image_aug = KT.crop_and_resize(image, boxes * 224, IMAGE_RESOLUTION)
 
                 # 旋转（度 -> 弧度）
-                angles_rad = rot_degs * torch.pi / 180.0
-                image_aug = KT.rotate(image_aug, angles_rad)
+                image_aug = KT.rotate(image_aug, rot_degs)
 
                 # 水平翻转（按掩码）
                 flip_mask = flip_vals > 0.5
                 if flip_mask.any():
-                    image_aug[flip_mask] = torch.flip(image_aug[flip_mask], dims=(3,))
+                    image_aug = torch.flip(image_aug, dims=(3,))
 
                 # 颜色扰动（preset）
                 image_aug = _apply_color_presets(image_aug, cj_idx)
