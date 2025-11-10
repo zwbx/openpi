@@ -34,7 +34,7 @@
         "request": "launch",
         "program": "test_model_debug.py",
         "console": "integratedTerminal",
-        "justMyCode": true
+        "justMyCode": false
     },
     {
         "name": "data",

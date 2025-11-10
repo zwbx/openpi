@@ -709,6 +709,8 @@ def train_loop(config: _config.TrainConfig):
                         if isinstance(preds, dict):
                             if preds.get('pred_next_image') is not None:
                                 pred_next_images = preds['pred_next_image'][:n]
+                            if preds.get('pred_delta_image') is not None:
+                                pred_delta_images = preds['pred_delta_image'][:n]
                             if preds.get('pred_actions') is not None:
                                 pred_actions = preds['pred_actions'][:n]
                             if preds.get('pred_state') is not None:
@@ -738,7 +740,7 @@ def train_loop(config: _config.TrainConfig):
 
                         # Build WandB table
                         table = wandb.Table(columns=[
-                            "cur_img", "cur_img_aug", "nxt_img", "nxt_img_aug", "nxt_img_pred", "embodiment_key",
+                            "cur_img", "cur_img_aug", "nxt_img", "nxt_img_aug", "pred_delta_img", "nxt_img_pred", "embodiment_key",
                             "language", "action_gt", "action_pred", "state_gt", "state_pred"
                         ])
 
@@ -748,6 +750,7 @@ def train_loop(config: _config.TrainConfig):
                             cur_img_aug_wb = _to_wandb_image(aug_obs_images[i]) if aug_obs_images is not None else None
                             nxt_img_wb = _to_wandb_image(nxt_imgs[i]) if nxt_imgs is not None else None
                             nxt_img_aug_wb = _to_wandb_image(aug_next_obs_images[i]) if aug_next_obs_images is not None else None
+                            pred_delta_img_wb = _to_wandb_image(pred_delta_images[i]) if pred_delta_images is not None else None
                             pred_img_wb = _to_wandb_image(pred_next_images[i]) if pred_next_images is not None else None
 
                             # Format vectors: action first 7 dims, state first 8 dims
@@ -765,6 +768,7 @@ def train_loop(config: _config.TrainConfig):
                                 cur_img_aug_wb,
                                 nxt_img_wb,
                                 nxt_img_aug_wb,
+                                pred_delta_img_wb,
                                 pred_img_wb,
                                 embodiment_keys[i],
                                 texts[i] if i < len(texts) else "",
