@@ -560,7 +560,7 @@ class TrainConfig:
     wandb_enabled: bool = True
 
     # Visualization logging interval (in steps). 0 disables visual logging.
-    visual_log_interval: int = 500
+    visual_log_interval: int = 1000
     # Number of samples to log per visualization step.
     visual_num_samples: int = 5
 
@@ -823,7 +823,7 @@ _CONFIGS = [
                 max_num_episodes=10,
             ),
         ),
-        batch_size=3,
+        batch_size=5,
         save_interval=100,
         overwrite=True,
         exp_name="debug",
