@@ -602,20 +602,24 @@ def train_loop(config: _config.TrainConfig):
             #     }, debug_save_path)
             #     logging.info(f"Saved model inputs to {debug_save_path} for debugging")
 
-            # Forward pass (may return (losses, preds))
-            outputs = model(observation, actions, next_obs=next_obs, base_embodiment_keys=key)
-            preds = None
-            if isinstance(outputs, tuple) and len(outputs) == 2:
-                losses, preds = outputs
+            # Forward pass; support legacy (losses, preds) tuples
+            out = model(observation, actions, next_obs=next_obs, base_embodiment_keys=key)
+            if isinstance(out, tuple):
+                losses = out[0]
             else:
-                losses = outputs
-            # Reduce loss
+                losses = out
+
+            # Reduce scalar loss for backward
             if isinstance(losses, dict):
                 loss = torch.stack([losses[k].mean() for k in losses.keys()]).mean()
-            elif isinstance(losses, (list, tuple)):
-                loss = torch.stack([x.mean() if isinstance(x, torch.Tensor) else torch.as_tensor(x, device=device).mean() for x in losses]).mean()
             elif isinstance(losses, torch.Tensor):
                 loss = losses.mean()
+            elif isinstance(losses, (list, tuple)):
+                # Fallback: average numeric tensors
+                loss = torch.stack([
+                    x.mean() if isinstance(x, torch.Tensor) else torch.as_tensor(x, device=device).mean()
+                    for x in losses
+                ]).mean()
             else:
                 loss = torch.tensor(losses, device=device, dtype=torch.float32).mean()
 
@@ -642,10 +646,11 @@ def train_loop(config: _config.TrainConfig):
 
             # Collect stats
             if is_main:
+                extra_metrics = {k: v.mean().item() for k, v in losses.items()} if isinstance(losses, dict) else {}
                 infos.append(
                     {
                         "loss": loss.item(),
-                        **{k: v.mean().item() for k, v in losses.items()},
+                        **extra_metrics,
                         "learning_rate": optim.param_groups[0]["lr"],
                         "grad_norm": float(grad_norm) if isinstance(grad_norm, torch.Tensor) else grad_norm,
                     }
@@ -656,7 +661,9 @@ def train_loop(config: _config.TrainConfig):
 
                 # Average stats over log interval
                 avg_loss = sum(info["loss"] for info in infos) / len(infos)
-                avg_losses = {k: sum(info[k] for info in infos) / len(infos) for k in losses.keys()}
+                avg_losses = (
+                    {k: sum(info[k] for info in infos) / len(infos) for k in losses.keys()} if isinstance(losses, dict) else {}
+                )
                 avg_lr = sum(info["learning_rate"] for info in infos) / len(infos)
 
                 avg_grad_norm = None
@@ -685,9 +692,21 @@ def train_loop(config: _config.TrainConfig):
                         log_payload["grad_norm"] = avg_grad_norm
                     wandb.log(log_payload, step=global_step)
 
-                # Visual logging at a separate interval
-                if config.wandb_enabled and getattr(config, 'visual_log_interval', 0) and (global_step % config.visual_log_interval == 0):
+            # Visual logging at a separate interval
+            if (
+                config.wandb_enabled
+                and getattr(config, 'visual_log_interval', 0)
+                and (global_step % config.visual_log_interval == 0)
+            ):
+                # Require next_obs for visual predictions; otherwise skip safely
+                if next_obs is None:
+                    logging.debug("Skipping visual logging: next_obs not available for this dataset/config")
+                else:
                     try:
+                        preds = model.sample_action_and_alignment_prediction(
+                            device, observation, actions, next_obs, base_embodiment_keys=key, num_steps=10
+                        )
+
                         # Prepare up to N samples
                         n = int(getattr(config, 'visual_num_samples', 5))
                         # Select first camera (main)
@@ -784,8 +803,8 @@ def train_loop(config: _config.TrainConfig):
                         traceback.print_exc()
                         logging.warning(f"Visual logging failed: {e}")
 
-                start_time = time.time()
-                infos = []  # Reset stats collection
+            start_time = time.time()
+            infos = []  # Reset stats collection
 
             global_step += 1
             # Save checkpoint using the new mechanism
@@ -794,8 +813,13 @@ def train_loop(config: _config.TrainConfig):
             # Update progress bar
             if pbar is not None:
                 pbar.update(1)
+                current_losses = (
+                    {k: (v.mean().item() if isinstance(v, torch.Tensor) else float(v)) for k, v in losses.items()}
+                    if isinstance(losses, dict)
+                    else {}
+                )
                 pbar.set_postfix(
-                    {"loss": f"{loss.item():.4f}", **{k: f"{v:.4f}" for k, v in avg_losses.items()}, "lr": f"{optim.param_groups[0]['lr']:.2e}", "step": global_step}
+                    {"loss": f"{loss.item():.4f}", **{k: f"{v:.4f}" for k, v in current_losses.items()}, "lr": f"{optim.param_groups[0]['lr']:.2e}", "step": global_step}
                 )
 
     # Close progress bar

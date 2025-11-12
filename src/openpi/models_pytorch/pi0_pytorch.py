@@ -336,23 +336,21 @@ class PI0Pytorch(nn.Module):
         except Exception:
             return 14
 
-    def get_embodiment_token(self, embodiment_keys, batch_size: int):
+
+    def get_embodiment_token(self, base_embodiment_keys, obs_aug_metadata, act_aug_metadata, batch_size: int):
         """
         根据 embodiment key 获取对应的 E-Token
 
         Args:
-            embodiment_keys: EmbodimentKey 或 List[EmbodimentKey] (batch)
+            base_embodiment_keys: base embodiment keys
+            obs_aug_metadata: observation augmentation metadata
+            act_aug_metadata: action augmentation metadata
             batch_size: batch size
 
         Returns:
             e_token: [batch_size, num_tokens, hidden_dim]
         """
-        # if not self.use_peft_prefix_token or self.peft_prefix_token_bank is None:
-        #     return None
-
-        # # 转换为 list
-        # if not isinstance(embodiment_keys, list):
-        #     embodiment_keys = [embodiment_keys] * batch_size
+        embodiment_keys = _preprocessing.build_embodiment_keys(base_embodiment_keys, obs_aug_metadata, act_aug_metadata)
 
         # 获取每个样本的 embodiment ID
         embodiment_ids = []
@@ -741,7 +739,7 @@ class PI0Pytorch(nn.Module):
         return embs, pad_masks, att_masks, adarms_cond, block_diagonal_ranges
 
     def forward(self, observation, actions, noise=None, time=None, next_obs=None, base_embodiment_keys=None) -> Tensor:
-        """Do a full training forward pass and compute losses and preds.
+        """Do a full training forward pass and compute losses.
 
         Args:
             observation: Input observations
@@ -755,9 +753,7 @@ class PI0Pytorch(nn.Module):
             If use_alignment_expert=False:
                 action_loss tensor of shape [B, T, D]
             If use_alignment_expert=True:
-                (losses: dict[str, Tensor], preds: dict[str, Any]) where preds includes
-                'pred_actions', 'pred_state', 'pred_next_image', and augmented images
-                'aug_obs_images' and 'aug_next_obs_images'.
+                losses: dict[str, Tensor]
         """
         batch_size = actions.shape[0]
         # Preprocess observation and collect augmentation metadata
@@ -767,10 +763,6 @@ class PI0Pytorch(nn.Module):
         # Action augmentation: grouped scale via preprocessing util
         actions, act_aug_metadata = self._preprocess_actions(actions, return_aug_params=True)
 
-        # Build final augmentation keys from obs/action metadata and provided embodiment_keys
-        embodiment_keys = _preprocessing.build_embodiment_keys(
-            base_embodiment_keys, obs_aug_metadata, act_aug_metadata
-        )
    
         if noise is None:
             noise = self.sample_noise(actions.shape, actions.device)
@@ -808,6 +800,8 @@ class PI0Pytorch(nn.Module):
 
             # Task 2: Dynamics (action + noisy_next_obs -> next image pixels)
             # Use first camera as main view
+            next_obs_features = self.paligemma_with_expert.embed_image(images_next[0])
+
             delta_img = images_next[0] - images[0]  # [B, C, H, W] in [-1, 1]
             patch_size = 14
             delta_img = delta_img.permute(0, 2, 3, 1).unfold(1, patch_size, patch_size).unfold(2, patch_size, patch_size).contiguous()
@@ -844,7 +838,7 @@ class PI0Pytorch(nn.Module):
                     noisy_state=state_t,
                     actions=action_one_step,  # clean actions for dynamics task
                     noisy_next_obs_features=delta_img_t,
-                    next_obs_features=delta_img,  # clean next_obs for inverse dynamics task
+                    next_obs_features=next_obs_features,  # clean next_obs for inverse dynamics task
                     noisy_actions=actions_t_inv,
                     timestep=time,
                 )
@@ -856,7 +850,7 @@ class PI0Pytorch(nn.Module):
         # add prefix embodiment token
         if self.use_peft_prefix_token:
             batch_size = actions.shape[0]
-            e_tok = self.get_embodiment_token(embodiment_keys, batch_size)
+            e_tok = self.get_embodiment_token(base_embodiment_keys, obs_aug_metadata, act_aug_metadata, batch_size)
             prefix_embs = torch.cat([prefix_embs,e_tok], dim=1)
             prefix_pad_masks = torch.cat([prefix_pad_masks, torch.ones(batch_size, e_tok.shape[1], dtype=torch.bool, device=actions.device)], dim=1)
             # for prefix_att_masks
@@ -995,7 +989,6 @@ class PI0Pytorch(nn.Module):
         v_t_inv_dynamics = self._apply_checkpoint(self.action_out_proj, inv_dynamics_action_hidden)  # [batch, action_dim]
         inverse_dynamics_loss = F.mse_loss(v_t_inv_dynamics, u_t_inv_dynamics, reduction="none")
 
-        # Return both loss dict and outputs dict
         losses = {
             'action_loss': action_loss,
             'perception_loss': perception_loss,
@@ -1003,43 +996,8 @@ class PI0Pytorch(nn.Module):
             'inverse_dynamics_loss': inverse_dynamics_loss,
         }
 
-        # Predictions
-        pred_actions = noise - v_t  # [B, T, D]
-        pred_state = noise_perception - v_t_perception  # [B, state_dim]
-
-        pred_img_tokens = (noise_delta_img - v_t_dynamics_tokens)
-        pred_delta_image = pred_img_tokens.reshape(batch_size,14,14,3,16,16).permute(0,3,1,4,2,5).contiguous().reshape(batch_size,3,224,224) 
-        pred_next_image = pred_delta_image + images[0]
-
-
-        # Augmented images for inspection: build mapping from keys -> tensors
-        try:
-            aug_obs_images = None
-            if hasattr(observation, 'images') and isinstance(observation.images, dict):
-                obs_keys = list(observation.images.keys())
-                aug_obs_images = {k: v for k, v in zip(obs_keys, images, strict=False)}
-        except Exception:
-            aug_obs_images = None
-
-        aug_next_obs_images = None
-        try:
-            if next_obs is not None and hasattr(next_obs, 'images') and isinstance(next_obs.images, dict) and 'images_next' in locals():
-                nxt_keys = list(next_obs.images.keys())
-                aug_next_obs_images = {k: v for k, v in zip(nxt_keys, images_next, strict=False)}
-        except Exception:
-            aug_next_obs_images = None
-
-        preds = {
-            'pred_actions': pred_actions,
-            'pred_state': pred_state,
-            'pred_delta_image': pred_delta_image,
-            'pred_next_image': pred_next_image,
-            'aug_obs_images': aug_obs_images,
-            'aug_next_obs_images': aug_next_obs_images,
-            'embodiment_keys': embodiment_keys,
-        }
-
-        return (losses, preds)
+        return losses
+    
 
     def update_online_buffer(self, observation, action):
         """更新 online buffer
@@ -1297,3 +1255,255 @@ class PI0Pytorch(nn.Module):
         suffix_out = suffix_out[:, -self.config.action_horizon :]
         suffix_out = suffix_out.to(dtype=torch.float32)
         return self.action_out_proj(suffix_out)
+
+
+    @ torch.no_grad()
+    def sample_action_and_alignment_prediction(self, device, observation, actions, next_observation, base_embodiment_keys=None, num_steps=10):
+        """Full iterative sampling for action and alignment predictions.
+
+        Args:
+            observation: Input observations
+            actions: Input actions
+            next_observation: Input next observations
+            num_steps: Number of steps to sample
+            base_embodiment_keys: Base embodiment keys
+
+        Returns dict with keys:
+        - 'pred_actions': [B, T, action_dim]
+        - 'pred_state': [B, state_dim]
+        - 'pred_delta_image': [B, 256, 3*196]
+        - 'pred_next_image': [B, 3, H, W] (H=W=224 if using 14x14 patches x 16x16 grid)
+        """
+
+        bsize = observation.state.shape[0]
+
+        # Initialize noise variables for each predicted quantity
+        x_t_action = self.sample_noise((bsize, self.config.action_horizon, self.config.action_dim), device)
+        x_t_state = self.sample_noise((bsize, self.config.state_dim), device)
+        x_t_delta_img = self.sample_noise((bsize, 256, 3 * 196), device)
+        x_t_inv_action = self.sample_noise((bsize, self.config.action_dim), device)
+
+        # Preprocess observation and build prefix cache
+        (images, img_masks, lang_tokens, lang_masks, state) = self._preprocess_observation(
+            observation, train=False
+        )
+
+        (images_next, img_masks_next, lang_tokens_next, lang_masks_next, state_next) = self._preprocess_observation(
+            next_observation, train=False
+        )
+        # Use first camera view for next observation features
+        next_obs_features = self.paligemma_with_expert.embed_image(images_next[0])
+
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
+
+        # Optionally prepend PEFT E-Token from Token Bank to prefix
+        if getattr(self, 'use_peft_prefix_token', False) and self.prefix_token_bank is not None:
+            e_tok = self.prefix_token_bank(0)
+            prefix_embs = torch.cat([prefix_embs, e_tok], dim=1)
+            # pad mask: all ones for added tokens
+            prefix_pad_masks = torch.cat(
+                [prefix_pad_masks, torch.ones(bsize, e_tok.shape[1], dtype=torch.bool, device=prefix_embs.device)],
+                dim=1,
+            )
+            # att mask: start a new block at first E-Token, rest 0
+            e_mask_template = torch.zeros((e_tok.shape[1],), dtype=torch.int64, device=prefix_embs.device)
+            e_mask_template[0] = 1
+            e_mask = e_mask_template.view(1, -1).expand(bsize, -1)
+            prefix_att_masks = torch.cat([prefix_att_masks.to(dtype=torch.int64), e_mask], dim=1)
+
+        # Compute KV cache for image+language prefix
+        prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
+        prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
+
+        prefix_att_2d_masks_4d = self._prepare_attention_masks_4d(prefix_att_2d_masks)
+        self.paligemma_with_expert.paligemma.language_model.config._attn_implementation = "eager"  # noqa: SLF001
+
+        _, past_key_values = self.paligemma_with_expert.forward(
+            attention_mask=prefix_att_2d_masks_4d,
+            position_ids=prefix_position_ids,
+            past_key_values=None,
+            inputs_embeds=[prefix_embs, None],
+            use_cache=True,
+        )
+
+        # Iterative ODE integration from t=1 -> 0
+        dt = -1.0 / num_steps
+        dt = torch.tensor(dt, dtype=torch.float32, device=device)
+
+        time = torch.tensor(1.0, dtype=torch.float32, device=device)
+        while time >= -dt / 2:
+            expanded_time = time.expand(bsize)
+
+            v = self._denoise_step_action_and_alignment(
+                state=state,
+                actions=actions,
+                prefix_pad_masks=prefix_pad_masks,
+                past_key_values=past_key_values,
+                x_t_action=x_t_action,
+                x_t_state=x_t_state,
+                x_t_delta_img=x_t_delta_img,
+                next_obs_features=next_obs_features,
+                x_t_inv_action=x_t_inv_action,
+                timestep=expanded_time,
+            )
+
+            # Euler update (avoid in-place on x_t tensors)
+            x_t_action = x_t_action + dt * v['v_t_action']
+            x_t_state = x_t_state + dt * v['v_t_state']
+            x_t_delta_img = x_t_delta_img + dt * v['v_t_delta_img']
+            x_t_inv_action = x_t_inv_action + dt * v['v_t_inv_action']
+
+            time += dt
+
+        # Helper: unpatchify delta image tokens back to CHW
+        def unpatchify_rgb_tokens(delta_tokens, patch_size=14):
+            # delta_tokens: [B, 256, 3*196] -> [B, 3, 224, 224]
+            b = delta_tokens.shape[0]
+            # 256 = 16 x 16
+            grid = int((delta_tokens.shape[1]) ** 0.5)
+            assert grid * grid == delta_tokens.shape[1], "delta tokens must form a square grid"
+            c = 3
+            p = patch_size
+            # reshape to [B, grid, grid, 3, p, p]
+            x = delta_tokens.view(b, grid, grid, c, p, p)
+            # permute to [B, 3, grid, p, grid, p] -> [B, 3, grid*p, grid*p]
+            x = x.permute(0, 3, 1, 4, 2, 5).contiguous()
+            x = x.view(b, c, grid * p, grid * p)
+            return x
+
+        # Reconstruct next image for the first camera (consistent with training path)
+        current_img = images[0]  # [B, 3, H, W], normalized to [-1, 1]
+        pred_delta_img_chw = unpatchify_rgb_tokens(x_t_delta_img)
+        pred_next_image = current_img + pred_delta_img_chw
+
+        # Expose keys for visualization; if not using E-Token, still provide derived keys
+        # Build embodiment keys for visualization. We don't have augmentation
+        # metadata in sampling (train=False), so fall back to base keys only.
+        try:
+            embodiment_keys = _preprocessing.build_embodiment_keys(
+                base_embodiment_keys, obs_aug_metadata=None, act_aug_metadata=None
+            )
+        except Exception:
+            embodiment_keys = [""] * bsize
+
+        preds = {
+            'pred_actions': x_t_action,
+            'pred_state': x_t_state,
+            'pred_delta_image': x_t_delta_img,
+            'pred_next_image': pred_next_image,
+            'embodiment_keys': embodiment_keys,
+        }
+
+        return preds
+
+    def _denoise_step_action_and_alignment(
+        self,
+        state,
+        actions,
+        prefix_pad_masks,
+        past_key_values,
+        x_t_action,
+        x_t_state,
+        x_t_delta_img,
+        next_obs_features,
+        x_t_inv_action,
+        timestep,
+    ):
+        """One denoising step that jointly updates action and alignment variables."""
+        # Action suffix (depends on proprioceptive state and noisy actions)
+        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t_action, timestep)
+
+        # Alignment suffix (three tasks)
+        # For dynamics, we condition on the current best estimate of action (first step) and noisy next image features.
+        # For inverse dynamics, condition on current best estimate of next image features and noisy action.
+        action_one_step = actions[:, 0, :]
+        alignment_suffix_embs, alignment_pad_masks, alignment_att_masks, alignment_adarms_cond, block_diagonal_ranges = \
+            self.embed_alignment_suffix(
+                noisy_state=x_t_state,
+                actions=action_one_step,
+                noisy_next_obs_features=x_t_delta_img,
+                next_obs_features=next_obs_features,
+                noisy_actions=x_t_inv_action,
+                timestep=timestep,
+            )
+
+        # Concatenate masks for suffix only (prefix provided via past KV cache)
+        batch_size = prefix_pad_masks.shape[0]
+        suffix_len = suffix_pad_masks.shape[1]
+        alignment_len = alignment_pad_masks.shape[1]
+        total_suffix_len = suffix_len + alignment_len
+
+        # Build attention masks: combine action suffix and alignment suffix, and keep them in block-diagonal structure
+        pad_masks = torch.cat([suffix_pad_masks, alignment_pad_masks], dim=1)
+        att_masks = torch.cat([suffix_att_masks, alignment_att_masks], dim=1)
+
+        # Offset alignment block ranges by action suffix length
+        adjusted_alignment_block_ranges = [
+            (start + suffix_len, end + suffix_len) for (start, end) in block_diagonal_ranges
+        ]
+        # Final block structure within suffix tokens: [Action Suffix, Perception, Dynamics, Inv_Dynamics]
+        adjusted_block_diagonal_ranges = [(0, suffix_len)] + adjusted_alignment_block_ranges
+
+        # Build 2D masks: queries are suffix tokens, keys are [prefix, suffix]
+        suffix_att_2d_masks = make_att_2d_masks(
+            pad_masks,
+            att_masks,
+            block_diagonal_ranges=adjusted_block_diagonal_ranges,
+        )
+
+        prefix_len = prefix_pad_masks.shape[1]
+        prefix_pad_2d_masks = prefix_pad_masks[:, None, :].expand(batch_size, total_suffix_len, prefix_len)
+        full_att_2d_masks = torch.cat([prefix_pad_2d_masks, suffix_att_2d_masks], dim=2)
+
+        # Position ids for suffix tokens are offset by prefix length
+        prefix_offsets = torch.sum(prefix_pad_masks, dim=-1)[:, None]
+        position_ids = prefix_offsets + torch.cumsum(pad_masks, dim=1) - 1
+
+        # Prepare attention masks
+        full_att_2d_masks_4d = self._prepare_attention_masks_4d(full_att_2d_masks)
+        self.paligemma_with_expert.gemma_expert.model.config._attn_implementation = "eager"  # noqa: SLF001
+
+        # Forward with cached prefix; supply action suffix and alignment suffix only
+        outputs_embeds, _ = self.paligemma_with_expert.forward(
+            attention_mask=full_att_2d_masks_4d,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=[None, suffix_embs, alignment_suffix_embs],
+            use_cache=False,
+            adarms_cond=[None, adarms_cond, alignment_adarms_cond],
+        )
+
+        # Action vector field
+        action_out = outputs_embeds[1]
+        action_out = action_out[:, -self.config.action_horizon:]
+        action_out = action_out.to(dtype=torch.float32)
+        v_t_action = self.action_out_proj(action_out)
+
+        # Alignment vector fields
+        alignment_out = outputs_embeds[2]
+        alignment_out = alignment_out.to(dtype=torch.float32)
+
+        # Derive ranges from block_diagonal_ranges returned by embed_alignment_suffix (within alignment suffix only)
+        perception_range, dynamics_range, inv_dynamics_range = block_diagonal_ranges
+
+        # Perception: single token
+        perception_idx = perception_range[0]
+        perception_hidden = alignment_out[:, perception_idx]
+        v_t_state = self.state_out_proj(perception_hidden)
+
+        # Dynamics: image tokens (skip the first action token inside alignment dynamics block)
+        dynamics_image_start = dynamics_range[0] + 1
+        dynamics_image_hidden = alignment_out[:, dynamics_image_start:dynamics_range[1]]
+        v_t_delta_img = self.rgb_out_proj(dynamics_image_hidden)
+
+        # Inverse dynamics: last token in that block corresponds to action
+        inv_dynamics_action_idx = inv_dynamics_range[1] - 1
+        inv_dynamics_action_hidden = alignment_out[:, inv_dynamics_action_idx]
+        v_t_inv_action = self.action_out_proj(inv_dynamics_action_hidden)
+
+        return {
+            'v_t_action': v_t_action,
+            'v_t_state': v_t_state,
+            'v_t_delta_img': v_t_delta_img,
+            'v_t_inv_action': v_t_inv_action,
+        }
