@@ -233,6 +233,7 @@ class PI0Pytorch(nn.Module):
         self.state_out_proj = nn.Linear(alignment_expert_config.width, 32)
 
         self.rgb_in_proj = nn.Linear(3*196, alignment_expert_config.width)
+        self.rgb_feat_in_proj = nn.Linear(self.width, alignment_expert_config.width)
         self.rgb_out_proj = nn.Linear(alignment_expert_config.width, 3*196)
 
         # PEFT prefix token bank (E-Token Bank) using nn.Embedding
@@ -710,7 +711,7 @@ class PI0Pytorch(nn.Module):
         # Task 3: Inverse Dynamics - embed next_obs + noisy_actions
         next_obs_features = next_obs_features.float()
         # Inverse dynamics always uses feature-space embedding of next_obs_features
-        emb_next_obs_features = self._apply_checkpoint(self.rgb_in_proj, next_obs_features)
+        emb_next_obs_features = self._apply_checkpoint(self.rgb_feat_in_proj, next_obs_features)
         emb_noisy_actions = self._apply_checkpoint(self.action_in_proj, noisy_actions)[:, None, :]
         embs.append(emb_next_obs_features)
         embs.append(emb_noisy_actions)
@@ -1277,11 +1278,6 @@ class PI0Pytorch(nn.Module):
 
         bsize = observation.state.shape[0]
 
-        # Initialize noise variables for each predicted quantity
-        x_t_action = self.sample_noise((bsize, self.config.action_horizon, self.config.action_dim), device)
-        x_t_state = self.sample_noise((bsize, self.config.state_dim), device)
-        x_t_delta_img = self.sample_noise((bsize, 256, 3 * 196), device)
-        x_t_inv_action = self.sample_noise((bsize, self.config.action_dim), device)
 
         # Preprocess observation and build prefix cache
         (images, img_masks, lang_tokens, lang_masks, state) = self._preprocess_observation(
@@ -1291,14 +1287,23 @@ class PI0Pytorch(nn.Module):
         (images_next, img_masks_next, lang_tokens_next, lang_masks_next, state_next) = self._preprocess_observation(
             next_observation, train=False
         )
+
         # Use first camera view for next observation features
         next_obs_features = self.paligemma_with_expert.embed_image(images_next[0])
+
+
+        # Initialize noise variables for each predicted quantity
+        x_t_action = self.sample_noise(actions.shape, device)
+        x_t_state = self.sample_noise((bsize, state.shape[-1]), device)
+        x_t_delta_img = self.sample_noise((bsize, 256, 3 * 196), device)
+        x_t_inv_action = self.sample_noise(actions[:,0,:].shape, device)
+
 
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
 
         # Optionally prepend PEFT E-Token from Token Bank to prefix
         if getattr(self, 'use_peft_prefix_token', False) and self.prefix_token_bank is not None:
-            e_tok = self.prefix_token_bank(0)
+            e_tok = self.prefix_token_bank(torch.zeros(bsize, dtype=torch.long,device=device))[:,None,:]
             prefix_embs = torch.cat([prefix_embs, e_tok], dim=1)
             # pad mask: all ones for added tokens
             prefix_pad_masks = torch.cat(
@@ -1322,7 +1327,7 @@ class PI0Pytorch(nn.Module):
             attention_mask=prefix_att_2d_masks_4d,
             position_ids=prefix_position_ids,
             past_key_values=None,
-            inputs_embeds=[prefix_embs, None],
+            inputs_embeds=[prefix_embs, None, None],
             use_cache=True,
         )
 
