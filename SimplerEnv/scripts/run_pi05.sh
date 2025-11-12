@@ -1,7 +1,7 @@
 XDG_RUNTIME_DIR=/usr/lib
 LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}"
 
-source /opt/tiger/openpi/.venv/bin/activate
+source /opt/tiger/pi05_align/.venv/bin/activate
 model_name=pi05
 
 tasks=(

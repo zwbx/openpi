@@ -12,7 +12,7 @@ pi05_base_pytorch/
 # Data directories.
 
 checkpoints/
-data/
+# data/
 wandb/
 
 # Byte-compiled / optimized / DLL files
@@ -141,7 +141,7 @@ celerybeat.pid
 # Environments
 .env
 .venv
-env/
+# env/
 venv/
 ENV/
 env.bak/
