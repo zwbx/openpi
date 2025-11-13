@@ -355,9 +355,9 @@ class PI0Pytorch(nn.Module):
 
         # 获取每个样本的 embodiment ID
         embodiment_ids = []
-        for key in embodiment_keys:
+        for key, obs_aug_param, act_aug_param in zip(embodiment_keys, obs_aug_metadata['params'], act_aug_metadata['params']):
             # 直接使用 key 注册或获取 embodiment ID
-            embodiment_id = self.embodiment_registry.get_or_register(key)
+            embodiment_id = self.embodiment_registry.get_or_register(key, obs_aug_param, act_aug_param)
             embodiment_ids.append(embodiment_id)
 
         # 从 nn.Embedding 中查询 tokens
@@ -1234,6 +1234,95 @@ class PI0Pytorch(nn.Module):
 
         return x_t
 
+    @torch.no_grad()
+    def sample_actions_online(self, device, observation, noise=None, num_steps=10, use_align=False, align_type="online") -> Tensor:
+        """Do a full inference forward and compute the action (batch_size x num_steps x num_motors)"""
+        embodiment_keys_idx = random.choice(list(self.embodiment_registry.idx_to_key.keys()))
+        embodiment_keys = self.embodiment_registry.idx_to_key[embodiment_keys_idx]
+        obs_aug_params = self.embodiment_registry.idx_to_obs_aug_param[embodiment_keys_idx]
+        act_aug_params = self.embodiment_registry.idx_to_act_aug_param[embodiment_keys_idx]
+
+
+        bsize = observation.state.shape[0]
+        if noise is None:
+            actions_shape = (bsize, self.config.action_horizon, self.config.action_dim)
+            noise = self.sample_noise(actions_shape, device)
+
+        images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(observation, train=True, use_aug_params=obs_aug_params)
+
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
+
+
+        # Optionally prepend PEFT E-Token from Token Bank to prefix
+        if getattr(self, 'use_peft_prefix_token', False) and self.prefix_token_bank is not None:
+            e_tok = self.prefix_token_bank(torch.tensor(embodiment_keys_idx, dtype=torch.long,device=device))[:,None,:]
+            prefix_embs = torch.cat([prefix_embs, e_tok], dim=1)
+            # pad mask: all ones for added tokens
+            prefix_pad_masks = torch.cat(
+                [prefix_pad_masks, torch.ones(bsize, e_tok.shape[1], dtype=torch.bool, device=prefix_embs.device)],
+                dim=1,
+            )
+            # att mask: start a new block at first E-Token, rest 0
+            e_mask_template = torch.zeros((e_tok.shape[1],), dtype=torch.int64, device=prefix_embs.device)
+            e_mask_template[0] = 1
+            e_mask = e_mask_template.view(1, -1).expand(bsize, -1)
+            prefix_att_masks = torch.cat([prefix_att_masks.to(dtype=torch.int64), e_mask], dim=1)
+            
+        prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
+        prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
+
+        # Compute image and language key value cache
+        prefix_att_2d_masks_4d = self._prepare_attention_masks_4d(prefix_att_2d_masks)
+        self.paligemma_with_expert.paligemma.language_model.config._attn_implementation = "eager"  # noqa: SLF001
+
+        _, past_key_values = self.paligemma_with_expert.forward(
+            attention_mask=prefix_att_2d_masks_4d,
+            position_ids=prefix_position_ids,
+            past_key_values=None,
+            inputs_embeds=[prefix_embs, None, None],
+            use_cache=True,
+        )
+
+        dt = -1.0 / num_steps
+        dt = torch.tensor(dt, dtype=torch.float32, device=device)
+
+        x_t = noise
+        time = torch.tensor(1.0, dtype=torch.float32, device=device)
+        while time >= -dt / 2:
+            expanded_time = time.expand(bsize)
+            v_t = self._denoise_step(
+                state,
+                prefix_pad_masks,
+                past_key_values,
+                x_t,
+                expanded_time,
+            )
+
+            # Euler step - use new tensor assignment instead of in-place operation
+            x_t = x_t + dt * v_t
+            time += dt
+
+        # 在线适应: 更新 buffer 并根据频率执行 align
+        if use_align:
+            # 1. 更新 buffer(每次推理都更新)
+            self.update_online_buffer(observation, x_t)
+
+            # 2. 增加步数计数器
+            self.align_step_counter += 1
+
+            # 3. 检查是否需要执行 align(根据频率)
+            align_frequency = self.align_kwargs.get('align_frequency', 10)
+            if self.align_step_counter % align_frequency == 0:
+                logging.info(f"Running online alignment at step {self.align_step_counter}")
+                align_result = self.align(device)
+
+                if align_result is not None:
+                    logging.info(f"Alignment result: {align_result}")
+                else:
+                    logging.info("Alignment skipped (buffer not ready or no E-Token parameters)")
+
+        return x_t
+
     def _denoise_step(
         self,
         state,
@@ -1278,7 +1367,7 @@ class PI0Pytorch(nn.Module):
 
 
     @ torch.no_grad()
-    def sample_alignment_prediction(self, device, observation, actions, next_observation, base_embodiment_keys=None, num_steps=10):
+    def sample_alignment_prediction(self, device, observation, actions, next_observation, num_steps=10):
         """Full iterative sampling for alignment predictions.
 
         Args:
@@ -1286,7 +1375,6 @@ class PI0Pytorch(nn.Module):
             actions: Input actions
             next_observation: Input next observations
             num_steps: Number of steps to sample
-            base_embodiment_keys: Base embodiment keys
 
         Returns dict with keys:
         - 'pred_state': [B, state_dim]
@@ -1294,17 +1382,21 @@ class PI0Pytorch(nn.Module):
         - 'pred_next_image': [B, 3, H, W] (H=W=224 if using 14x14 patches x 16x16 grid)
         - 'embodiment_keys': [B]
         """
+        embodiment_keys_idx = random.choice(list(self.embodiment_registry.idx_to_key.keys()))
+        embodiment_keys = self.embodiment_registry.idx_to_key[embodiment_keys_idx]
+        obs_aug_params = self.embodiment_registry.idx_to_obs_aug_param[embodiment_keys_idx]
+        act_aug_params = self.embodiment_registry.idx_to_act_aug_param[embodiment_keys_idx]
 
         bsize = observation.state.shape[0]
 
 
         # Preprocess observation and build prefix cache
         (images, img_masks, lang_tokens, lang_masks, state) = self._preprocess_observation(
-            observation, train=False
+            observation, train=True, use_aug_params=obs_aug_params
         )
 
         (images_next, img_masks_next, lang_tokens_next, lang_masks_next, state_next) = self._preprocess_observation(
-            next_observation, train=False
+            next_observation, train=True, use_aug_params=obs_aug_params
         )
 
         # Use first camera view for next observation features
@@ -1321,7 +1413,7 @@ class PI0Pytorch(nn.Module):
 
         # Optionally prepend PEFT E-Token from Token Bank to prefix
         if getattr(self, 'use_peft_prefix_token', False) and self.prefix_token_bank is not None:
-            e_tok = self.prefix_token_bank(torch.zeros(bsize, dtype=torch.long,device=device))[:,None,:]
+            e_tok = self.prefix_token_bank(torch.tensor(embodiment_keys_idx, dtype=torch.long,device=device))[:,None,:]
             prefix_embs = torch.cat([prefix_embs, e_tok], dim=1)
             # pad mask: all ones for added tokens
             prefix_pad_masks = torch.cat(
@@ -1399,15 +1491,6 @@ class PI0Pytorch(nn.Module):
         pred_delta_img_chw = unpatchify_rgb_tokens(x_t_delta_img)
         pred_next_image = current_img + pred_delta_img_chw
 
-        # Expose keys for visualization; if not using E-Token, still provide derived keys
-        # Build embodiment keys for visualization. We don't have augmentation
-        # metadata in sampling (train=False), so fall back to base keys only.
-        try:
-            embodiment_keys = _preprocessing.build_embodiment_keys(
-                base_embodiment_keys, obs_aug_metadata=None, act_aug_metadata=None
-            )
-        except Exception:
-            embodiment_keys = ["default"] * bsize
 
         preds = {   
             'pred_state': x_t_state,

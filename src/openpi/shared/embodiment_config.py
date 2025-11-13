@@ -130,13 +130,17 @@ class EmbodimentRegistry:
         self.mode = mode
         # 直接用 tuple 作为 key，性能最优（无需创建对象）
         self.key_to_idx: Dict[tuple, int] = {}
+        self.idx_to_key: Dict[int, tuple] = {}
+        self.idx_to_obs_aug_param: Dict[int, dict] = {}
+        self.idx_to_act_aug_param: Dict[int, dict] = {}
         self.key_to_idx['lerobot-pi0-bridge_widowx_no_geom_aug|act_tx=1|act_rt=1'] = 0
-        # self.idx_to_key = {0: 'lerobot-pi0-bridge_widowx_no_geom_aug|act_tx=1|act_rt=1'}
-        # self.idx_to_obs_aug_key = {0: 'lerobot-pi0-bridge_widowx_no_geom_aug'}
+        self.idx_to_key[0] = 'lerobot-pi0-bridge_widowx_no_geom_aug|act_tx=1|act_rt=1'
+        self.idx_to_obs_aug_param[0] = {'base_0_rgb': {'crop_scale': 1.0, 'crop_pos': 'C', 'rotation_deg': 0.0, 'flip': 0, 'cj_preset': 0}}
+        self.idx_to_act_aug_param[0] = {'transition': 1.0, 'rotation': 1.0}
 
         logger.info(f"Initialized EmbodimentRegistry in {mode} mode")
 
-    def get_or_register(self, key: tuple | EmbodimentKey) -> int:
+    def get_or_register(self, key: tuple | EmbodimentKey, obs_aug_param: str | None = None, act_aug_param: str | None = None) -> int:
         """
         获取 embodiment key 对应的 W index
 
@@ -174,11 +178,8 @@ class EmbodimentRegistry:
         # 自动注册
         new_idx = len(self.key_to_idx)
         self.key_to_idx[key] = new_idx
-        # self.idx_to_key[new_idx] = key
+        self.idx_to_key[new_idx] = key
+        self.idx_to_obs_aug_param[new_idx] = obs_aug_param
+        self.idx_to_act_aug_param[new_idx] = act_aug_param
 
-        # logger.info(
-        #     f"[EmbodimentRegistry] Registered new embodiment:\n"
-        #     f"  W Index: {new_idx}\n"
-        #     f"  Key: {key}"
-        # )
         return new_idx

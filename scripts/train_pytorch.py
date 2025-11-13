@@ -706,9 +706,9 @@ def train_loop(config: _config.TrainConfig):
                         model.gradient_checkpointing_disable()
                         model.eval()
                         alignment_preds = model.sample_alignment_prediction(
-                            device, observation, actions, next_obs, base_embodiment_keys=key, num_steps=10
+                            device, observation, actions, next_obs, num_steps=10
                         )
-                        action_preds = model.sample_actions(
+                        action_preds = model.sample_actions_online(
                             device, observation, noise=None, num_steps=10
                         )
                         model.gradient_checkpointing_enable()
