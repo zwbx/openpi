@@ -1160,6 +1160,23 @@ class PI0Pytorch(nn.Module):
         images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(observation, train=False)
 
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
+
+
+        # Optionally prepend PEFT E-Token from Token Bank to prefix
+        if getattr(self, 'use_peft_prefix_token', False) and self.prefix_token_bank is not None:
+            e_tok = self.prefix_token_bank(torch.zeros(bsize, dtype=torch.long,device=device))[:,None,:]
+            prefix_embs = torch.cat([prefix_embs, e_tok], dim=1)
+            # pad mask: all ones for added tokens
+            prefix_pad_masks = torch.cat(
+                [prefix_pad_masks, torch.ones(bsize, e_tok.shape[1], dtype=torch.bool, device=prefix_embs.device)],
+                dim=1,
+            )
+            # att mask: start a new block at first E-Token, rest 0
+            e_mask_template = torch.zeros((e_tok.shape[1],), dtype=torch.int64, device=prefix_embs.device)
+            e_mask_template[0] = 1
+            e_mask = e_mask_template.view(1, -1).expand(bsize, -1)
+            prefix_att_masks = torch.cat([prefix_att_masks.to(dtype=torch.int64), e_mask], dim=1)
+            
         prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
         prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
 
@@ -1171,7 +1188,7 @@ class PI0Pytorch(nn.Module):
             attention_mask=prefix_att_2d_masks_4d,
             position_ids=prefix_position_ids,
             past_key_values=None,
-            inputs_embeds=[prefix_embs, None],
+            inputs_embeds=[prefix_embs, None, None],
             use_cache=True,
         )
 
@@ -1247,9 +1264,9 @@ class PI0Pytorch(nn.Module):
             attention_mask=full_att_2d_masks_4d,
             position_ids=position_ids,
             past_key_values=past_key_values,
-            inputs_embeds=[None, suffix_embs],
+            inputs_embeds=[None, suffix_embs, None],
             use_cache=False,
-            adarms_cond=[None, adarms_cond],
+            adarms_cond=[None, adarms_cond, None],
         )
 
         suffix_out = outputs_embeds[1]
@@ -1259,8 +1276,8 @@ class PI0Pytorch(nn.Module):
 
 
     @ torch.no_grad()
-    def sample_action_and_alignment_prediction(self, device, observation, actions, next_observation, base_embodiment_keys=None, num_steps=10):
-        """Full iterative sampling for action and alignment predictions.
+    def sample_alignment_prediction(self, device, observation, actions, next_observation, base_embodiment_keys=None, num_steps=10):
+        """Full iterative sampling for alignment predictions.
 
         Args:
             observation: Input observations
@@ -1270,10 +1287,10 @@ class PI0Pytorch(nn.Module):
             base_embodiment_keys: Base embodiment keys
 
         Returns dict with keys:
-        - 'pred_actions': [B, T, action_dim]
         - 'pred_state': [B, state_dim]
         - 'pred_delta_image': [B, 256, 3*196]
         - 'pred_next_image': [B, 3, H, W] (H=W=224 if using 14x14 patches x 16x16 grid)
+        - 'embodiment_keys': [B]
         """
 
         bsize = observation.state.shape[0]
@@ -1293,7 +1310,6 @@ class PI0Pytorch(nn.Module):
 
 
         # Initialize noise variables for each predicted quantity
-        x_t_action = self.sample_noise(actions.shape, device)
         x_t_state = self.sample_noise((bsize, state.shape[-1]), device)
         x_t_delta_img = self.sample_noise((bsize, 256, 3 * 196), device)
         x_t_inv_action = self.sample_noise(actions[:,0,:].shape, device)
@@ -1344,7 +1360,7 @@ class PI0Pytorch(nn.Module):
                 actions=actions,
                 prefix_pad_masks=prefix_pad_masks,
                 past_key_values=past_key_values,
-                x_t_action=x_t_action,
+                # x_t_action=x_t_action,
                 x_t_state=x_t_state,
                 x_t_delta_img=x_t_delta_img,
                 next_obs_features=next_obs_features,
@@ -1353,7 +1369,7 @@ class PI0Pytorch(nn.Module):
             )
 
             # Euler update (avoid in-place on x_t tensors)
-            x_t_action = x_t_action + dt * v['v_t_action']
+            # x_t_action = x_t_action + dt * v['v_t_action']
             x_t_state = x_t_state + dt * v['v_t_state']
             x_t_delta_img = x_t_delta_img + dt * v['v_t_delta_img']
             x_t_inv_action = x_t_inv_action + dt * v['v_t_inv_action']
@@ -1389,10 +1405,9 @@ class PI0Pytorch(nn.Module):
                 base_embodiment_keys, obs_aug_metadata=None, act_aug_metadata=None
             )
         except Exception:
-            embodiment_keys = [""] * bsize
+            embodiment_keys = ["default"] * bsize
 
-        preds = {
-            'pred_actions': x_t_action,
+        preds = {   
             'pred_state': x_t_state,
             'pred_delta_image': x_t_delta_img,
             'pred_next_image': pred_next_image,
@@ -1407,7 +1422,7 @@ class PI0Pytorch(nn.Module):
         actions,
         prefix_pad_masks,
         past_key_values,
-        x_t_action,
+        # x_t_action,
         x_t_state,
         x_t_delta_img,
         next_obs_features,
@@ -1416,7 +1431,7 @@ class PI0Pytorch(nn.Module):
     ):
         """One denoising step that jointly updates action and alignment variables."""
         # Action suffix (depends on proprioceptive state and noisy actions)
-        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t_action, timestep)
+        # suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t_action, timestep)
 
         # Alignment suffix (three tasks)
         # For dynamics, we condition on the current best estimate of action (first step) and noisy next image features.
@@ -1434,35 +1449,16 @@ class PI0Pytorch(nn.Module):
 
         # Concatenate masks for suffix only (prefix provided via past KV cache)
         batch_size = prefix_pad_masks.shape[0]
-        suffix_len = suffix_pad_masks.shape[1]
-        alignment_len = alignment_pad_masks.shape[1]
-        total_suffix_len = suffix_len + alignment_len
-
-        # Build attention masks: combine action suffix and alignment suffix, and keep them in block-diagonal structure
-        pad_masks = torch.cat([suffix_pad_masks, alignment_pad_masks], dim=1)
-        att_masks = torch.cat([suffix_att_masks, alignment_att_masks], dim=1)
-
-        # Offset alignment block ranges by action suffix length
-        adjusted_alignment_block_ranges = [
-            (start + suffix_len, end + suffix_len) for (start, end) in block_diagonal_ranges
-        ]
-        # Final block structure within suffix tokens: [Action Suffix, Perception, Dynamics, Inv_Dynamics]
-        adjusted_block_diagonal_ranges = [(0, suffix_len)] + adjusted_alignment_block_ranges
-
-        # Build 2D masks: queries are suffix tokens, keys are [prefix, suffix]
-        suffix_att_2d_masks = make_att_2d_masks(
-            pad_masks,
-            att_masks,
-            block_diagonal_ranges=adjusted_block_diagonal_ranges,
-        )
-
         prefix_len = prefix_pad_masks.shape[1]
-        prefix_pad_2d_masks = prefix_pad_masks[:, None, :].expand(batch_size, total_suffix_len, prefix_len)
-        full_att_2d_masks = torch.cat([prefix_pad_2d_masks, suffix_att_2d_masks], dim=2)
+        alignment_len = alignment_pad_masks.shape[1]
 
+        prefix_pad_2d_masks = prefix_pad_masks[:, None, :].expand(batch_size, alignment_len, prefix_len)
+        alignment_att_2d_masks = make_att_2d_masks(alignment_pad_masks, alignment_att_masks)
+        full_att_2d_masks = torch.cat([prefix_pad_2d_masks, alignment_att_2d_masks], dim=2)
+        # Build attention masks: combine action suffix and alignment suffix, and keep them in block-diagonal structure
         # Position ids for suffix tokens are offset by prefix length
         prefix_offsets = torch.sum(prefix_pad_masks, dim=-1)[:, None]
-        position_ids = prefix_offsets + torch.cumsum(pad_masks, dim=1) - 1
+        position_ids = prefix_offsets + torch.cumsum(alignment_pad_masks, dim=1) - 1
 
         # Prepare attention masks
         full_att_2d_masks_4d = self._prepare_attention_masks_4d(full_att_2d_masks)
@@ -1473,16 +1469,10 @@ class PI0Pytorch(nn.Module):
             attention_mask=full_att_2d_masks_4d,
             position_ids=position_ids,
             past_key_values=past_key_values,
-            inputs_embeds=[None, suffix_embs, alignment_suffix_embs],
+            inputs_embeds=[None, None, alignment_suffix_embs],
             use_cache=False,
-            adarms_cond=[None, adarms_cond, alignment_adarms_cond],
+            adarms_cond=[None, None, alignment_adarms_cond],
         )
-
-        # Action vector field
-        action_out = outputs_embeds[1]
-        action_out = action_out[:, -self.config.action_horizon:]
-        action_out = action_out.to(dtype=torch.float32)
-        v_t_action = self.action_out_proj(action_out)
 
         # Alignment vector fields
         alignment_out = outputs_embeds[2]
@@ -1507,7 +1497,6 @@ class PI0Pytorch(nn.Module):
         v_t_inv_action = self.action_out_proj(inv_dynamics_action_hidden)
 
         return {
-            'v_t_action': v_t_action,
             'v_t_state': v_t_state,
             'v_t_delta_img': v_t_delta_img,
             'v_t_inv_action': v_t_inv_action,

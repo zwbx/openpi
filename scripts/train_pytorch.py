@@ -703,9 +703,14 @@ def train_loop(config: _config.TrainConfig):
                     logging.debug("Skipping visual logging: next_obs not available for this dataset/config")
                 else:
                     try:
-                        preds = model.sample_action_and_alignment_prediction(
+                        alignment_preds = model.sample_alignment_prediction(
                             device, observation, actions, next_obs, base_embodiment_keys=key, num_steps=10
                         )
+                        action_preds = model.sample_actions(
+                            device, observation, noise=None, base_embodiment_keys=key, num_steps=10
+                        )
+                        preds = {**alignment_preds, 'pred_actions': action_preds}
+
 
                         # Prepare up to N samples
                         n = int(getattr(config, 'visual_num_samples', 5))
