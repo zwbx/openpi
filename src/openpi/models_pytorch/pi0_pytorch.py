@@ -1397,7 +1397,7 @@ class PI0Pytorch(nn.Module):
 
         # Optionally prepend PEFT E-Token from Token Bank to prefix
         if getattr(self, 'use_peft_prefix_token', False) and self.prefix_token_bank is not None:
-            e_tok = self.prefix_token_bank(torch.tensor(embodiment_keys_idx, dtype=torch.long,device=device))[:,None,:]
+            e_tok = self.prefix_token_bank(torch.tensor(key_idx_list, dtype=torch.long,device=device))[:,None,:]
             prefix_embs = torch.cat([prefix_embs, e_tok], dim=1)
             # pad mask: all ones for added tokens
             prefix_pad_masks = torch.cat(
@@ -1478,6 +1478,8 @@ class PI0Pytorch(nn.Module):
 
         preds = {   
             'pred_state': x_t_state,
+            'aug_obs_images': images[0],
+            'aug_next_obs_images': images_next[0],
             'pred_delta_image': x_t_delta_img,
             'pred_next_image': pred_next_image,
             'embodiment_keys': embodiment_keys,

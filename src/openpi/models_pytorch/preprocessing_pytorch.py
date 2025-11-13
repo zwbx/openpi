@@ -24,7 +24,7 @@ IMAGE_RESOLUTION = (224, 224)
 # 离散参数定义（有限集合，1:1 可复现）
 ############################################
 
-_CROP_SCALES = (0.90,)
+_CROP_SCALES = (0.90,1.1)
 _CROP_POS = ("C", "U", "D", "L", "R")  # Center / Up / Down / Left / Right
 _ROT_DEGS = (-10.0, 10.0)
 # _FLIP = (0, 1)
@@ -287,9 +287,6 @@ def preprocess_observation_pytorch(
         if image.shape[1:3] != image_resolution:
             logger.info(f"Resizing image {key} from {image.shape[1:3]} to {image_resolution}")
             image = image_tools.resize_with_pad_torch(image, *image_resolution)
-            # Save resized image for debugging
-            if debug_save_images:
-                _save_debug_image(image, "02_resized", key, debug_dir="/opt/tiger/pi05_align/debug")
 
         if train:
             # 转 0..1，并使用 channels-first 以便几何函数
