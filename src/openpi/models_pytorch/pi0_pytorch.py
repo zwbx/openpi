@@ -1235,12 +1235,11 @@ class PI0Pytorch(nn.Module):
         return x_t
 
     @torch.no_grad()
-    def sample_actions_online(self, device, observation, noise=None, num_steps=10, use_align=False, align_type="online") -> Tensor:
+    def sample_actions_online(self, device, observation, noise=None, num_steps=10, key_idx_list=None) -> Tensor:
         """Do a full inference forward and compute the action (batch_size x num_steps x num_motors)"""
-        embodiment_keys_idx = random.choice(list(self.embodiment_registry.idx_to_key.keys()))
-        embodiment_keys = self.embodiment_registry.idx_to_key[embodiment_keys_idx]
-        obs_aug_params = self.embodiment_registry.idx_to_obs_aug_param[embodiment_keys_idx]
-        act_aug_params = self.embodiment_registry.idx_to_act_aug_param[embodiment_keys_idx]
+        obs_aug_params = []
+        for key_idx in key_idx_list:
+            obs_aug_params.append(self.embodiment_registry.idx_to_obs_aug_param[key_idx])
 
 
         bsize = observation.state.shape[0]
@@ -1255,7 +1254,7 @@ class PI0Pytorch(nn.Module):
 
         # Optionally prepend PEFT E-Token from Token Bank to prefix
         if getattr(self, 'use_peft_prefix_token', False) and self.prefix_token_bank is not None:
-            e_tok = self.prefix_token_bank(torch.tensor(embodiment_keys_idx, dtype=torch.long,device=device))[:,None,:]
+            e_tok = self.prefix_token_bank(torch.tensor(key_idx_list, dtype=torch.long,device=device))[:,None,:]
             prefix_embs = torch.cat([prefix_embs, e_tok], dim=1)
             # pad mask: all ones for added tokens
             prefix_pad_masks = torch.cat(
@@ -1301,25 +1300,6 @@ class PI0Pytorch(nn.Module):
             # Euler step - use new tensor assignment instead of in-place operation
             x_t = x_t + dt * v_t
             time += dt
-
-        # 在线适应: 更新 buffer 并根据频率执行 align
-        if use_align:
-            # 1. 更新 buffer(每次推理都更新)
-            self.update_online_buffer(observation, x_t)
-
-            # 2. 增加步数计数器
-            self.align_step_counter += 1
-
-            # 3. 检查是否需要执行 align(根据频率)
-            align_frequency = self.align_kwargs.get('align_frequency', 10)
-            if self.align_step_counter % align_frequency == 0:
-                logging.info(f"Running online alignment at step {self.align_step_counter}")
-                align_result = self.align(device)
-
-                if align_result is not None:
-                    logging.info(f"Alignment result: {align_result}")
-                else:
-                    logging.info("Alignment skipped (buffer not ready or no E-Token parameters)")
 
         return x_t
 
@@ -1367,7 +1347,7 @@ class PI0Pytorch(nn.Module):
 
 
     @ torch.no_grad()
-    def sample_alignment_prediction(self, device, observation, actions, next_observation, num_steps=10):
+    def sample_alignment_prediction(self, device, observation, actions, next_observation, num_steps=10, key_idx_list=None):
         """Full iterative sampling for alignment predictions.
 
         Args:
@@ -1382,10 +1362,14 @@ class PI0Pytorch(nn.Module):
         - 'pred_next_image': [B, 3, H, W] (H=W=224 if using 14x14 patches x 16x16 grid)
         - 'embodiment_keys': [B]
         """
-        embodiment_keys_idx = random.choice(list(self.embodiment_registry.idx_to_key.keys()))
-        embodiment_keys = self.embodiment_registry.idx_to_key[embodiment_keys_idx]
-        obs_aug_params = self.embodiment_registry.idx_to_obs_aug_param[embodiment_keys_idx]
-        act_aug_params = self.embodiment_registry.idx_to_act_aug_param[embodiment_keys_idx]
+
+        embodiment_keys = []
+        obs_aug_params = []
+        act_aug_params = []
+        for key_idx in key_idx_list:
+            embodiment_keys.append(self.embodiment_registry.idx_to_key[key_idx])
+            obs_aug_params.append(self.embodiment_registry.idx_to_obs_aug_param[key_idx])
+            act_aug_params.append(self.embodiment_registry.idx_to_act_aug_param[key_idx])
 
         bsize = observation.state.shape[0]
 

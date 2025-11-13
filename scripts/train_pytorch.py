@@ -39,6 +39,7 @@ import torch.distributed as dist
 import torch.nn.parallel
 import tqdm
 import wandb
+import random
 
 import openpi.models.pi0_config
 import openpi.models_pytorch.pi0_pytorch
@@ -705,11 +706,12 @@ def train_loop(config: _config.TrainConfig):
                     try:
                         model.gradient_checkpointing_disable()
                         model.eval()
+                        key_idx_list = [random.randint(0, len(model.embodiment_registry.idx_to_key) - 1) for _ in batch_size]
                         alignment_preds = model.sample_alignment_prediction(
-                            device, observation, actions, next_obs, num_steps=10
+                            device, observation, actions, next_obs, num_steps=10, key_idx_list=key_idx_list
                         )
                         action_preds = model.sample_actions_online(
-                            device, observation, noise=None, num_steps=10
+                            device, observation, noise=None, num_steps=10, key_idx_list=key_idx_list
                         )
                         model.gradient_checkpointing_enable()
                         model.train()
