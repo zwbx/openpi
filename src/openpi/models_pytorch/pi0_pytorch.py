@@ -375,6 +375,7 @@ class PI0Pytorch(nn.Module):
         self.paligemma_with_expert.paligemma.language_model.gradient_checkpointing = True
         self.paligemma_with_expert.paligemma.vision_tower.gradient_checkpointing = True
         self.paligemma_with_expert.gemma_expert.model.gradient_checkpointing = True
+        self.paligemma_with_expert.alignment_expert.model.gradient_checkpointing = True
 
         logging.info("Enabled gradient checkpointing for PI0Pytorch model")
 
@@ -384,6 +385,7 @@ class PI0Pytorch(nn.Module):
         self.paligemma_with_expert.paligemma.language_model.gradient_checkpointing = False
         self.paligemma_with_expert.paligemma.vision_tower.gradient_checkpointing = False
         self.paligemma_with_expert.gemma_expert.model.gradient_checkpointing = False
+        self.paligemma_with_expert.alignment_expert.model.gradient_checkpointing = False
 
         logging.info("Disabled gradient checkpointing for PI0Pytorch model")
 
@@ -1355,7 +1357,7 @@ class PI0Pytorch(nn.Module):
         while time >= -dt / 2:
             expanded_time = time.expand(bsize)
 
-            v = self._denoise_step_action_and_alignment(
+            v = self._denoise_step_and_alignment(
                 state=state,
                 actions=actions,
                 prefix_pad_masks=prefix_pad_masks,
@@ -1416,7 +1418,7 @@ class PI0Pytorch(nn.Module):
 
         return preds
 
-    def _denoise_step_action_and_alignment(
+    def _denoise_step_and_alignment(
         self,
         state,
         actions,
@@ -1462,7 +1464,7 @@ class PI0Pytorch(nn.Module):
 
         # Prepare attention masks
         full_att_2d_masks_4d = self._prepare_attention_masks_4d(full_att_2d_masks)
-        self.paligemma_with_expert.gemma_expert.model.config._attn_implementation = "eager"  # noqa: SLF001
+        self.paligemma_with_expert.alignment_expert.model.config._attn_implementation = "eager"  # noqa: SLF001
 
         # Forward with cached prefix; supply action suffix and alignment suffix only
         outputs_embeds, _ = self.paligemma_with_expert.forward(
