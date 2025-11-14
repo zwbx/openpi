@@ -24,11 +24,11 @@ IMAGE_RESOLUTION = (224, 224)
 # 离散参数定义（有限集合，1:1 可复现）
 ############################################
 
-_CROP_SCALES = (0.90,1.1)
+_CROP_SCALES = (0,0.90,1.1)
 _CROP_POS = ("C", "U", "D", "L", "R")  # Center / Up / Down / Left / Right
-_ROT_DEGS = (-10.0, 10.0)
+_ROT_DEGS = (0.0, -10.0, 10.0)
 # _FLIP = (0, 1)
-_FLIP = (0,)
+_FLIP = (0,1)
 
 # 颜色预设（有限档位，便于离散回放）；索引即 preset id
 _COLOR_PRESETS = (
@@ -50,8 +50,8 @@ def _sample_discrete(options: Sequence, batch_size: int, device: torch.device) -
 
 
 # Action scaling (discrete, per-sample, grouped)
-_ACTION_TRANS_SCALES = (0.8, 1.2)
-_ACTION_ROT_SCALES = (0.8, 1.2)
+_ACTION_TRANS_SCALES = (1.00, 0.80, 1.20)
+_ACTION_ROT_SCALES = (1.00, 0.80, 1.20)
 
 
 def sample_action_grouped_scales(
@@ -461,7 +461,6 @@ def preprocess_observation_pytorch(
                                 "flip": 0,
                                 "cj_preset": 0,
                             }
-                            per_sample_view_params[i][key] = descriptor
                         else:
                             descriptor = {
                                 "crop_scale": float(crop_scales[i].item()),
@@ -470,11 +469,11 @@ def preprocess_observation_pytorch(
                                 "flip": int(flip_vals[i].item()),
                                 "cj_preset": int(cj_idx[i].item()),
                             }
-                            per_sample_view_params[i][key] = descriptor
-                            if not is_wrist_view:
-                                per_sample_key_components[i].append(
-                                    f"{key}:{_format_geom_key(descriptor['crop_scale'], int(crop_pos_idx[i].item()), descriptor['rotation_deg'], descriptor['flip'])}"
-                                )
+                        per_sample_view_params[i][key] = descriptor
+                        if not is_wrist_view:
+                            per_sample_key_components[i].append(
+                                f"{key}:{_format_geom_key(descriptor['crop_scale'], int(crop_pos_idx[i].item()), descriptor['rotation_deg'], descriptor['flip'])}"
+                            )
 
             # 回到 [B,H,W,C]，并转回 [-1,1]
             image = image.permute(0, 2, 3, 1)
@@ -532,8 +531,7 @@ def preprocess_observation_pytorch(
             per_sample_key_components = [[] for _ in range(batch_size)]
 
         keys = [
-            "|".join(sorted(components)) if components else "no_geom_aug"
-            for components in per_sample_key_components
+            "|".join(sorted(components)) for components in per_sample_key_components
         ]
 
         aug_metadata = {

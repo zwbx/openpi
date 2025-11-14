@@ -392,21 +392,26 @@ class PI0Pytorch(nn.Module):
             act_aug_keys: List[str] | None, 每个样本的 act 选项 key
 
         """
+        from preprocessing_pytorch import _CROP_SCALES, _CROP_POS, _ROT_DEGS, _FLIP, _ACTION_TRANS_SCALES, _ACTION_ROT_SCALES
+
         device = self.prefix_token_bank.weight.device
         batch_size = len(base_embodiment_keys)
 
-        idx_ravel = (1,self.obs_crop_scales,self.obs_crop_pos,self.obs_rot_degs,self.obs_flip,self.act_trans_scales,self.act_rot_scales)
-        
-
-        random_flat_idx = torch.randint(0, self.num_embeddings, (batch_size,), device=device)
-        e_tokens = self.prefix_token_bank(random_flat_idx)
-
-        obs_aug_keys = []
-        act_aug_keys = []
+        idx_list = []
         for i in range(batch_size):
-            obs_aug_keys.append(self.obs_crop_scales[random_flat_idx[i] % self._n_cs])
-            act_aug_keys.append(self.act_trans_scales[random_flat_idx[i] % self._n_t])
-            act_aug_keys.append(self.act_rot_scales[random_flat_idx[i] % self._n_r])
+            crop_scale = obs_aug_metadata['params'][i]['base_0_rgb']['crop_scale']
+            crop_pos = obs_aug_metadata['params'][i]['base_0_rgb']['crop_pos']
+            rotation_deg = obs_aug_metadata['params'][i]['base_0_rgb']['rotation_deg']
+            flip = obs_aug_metadata['params'][i]['base_0_rgb']['flip']
+            transition = act_aug_metadata['params'][i]['action']['transition']
+            rotation = act_aug_metadata['params'][i]['action']['rotation']
+            idx = (_CROP_SCALES.index(crop_scale), _CROP_POS.index(crop_pos), _ROT_DEGS.index(rotation_deg), _FLIP.index(flip), _ACTION_TRANS_SCALES.index(transition), _ACTION_ROT_SCALES.index(rotation))
+            idx = torch.tensor(idx, dtype=torch.long, device=device)
+            idx_list.append(torch.ravel_multi_index(idx, (len(self.obs_crop_scales), len(self.obs_crop_pos), len(self.obs_rot_degs), len(self.obs_flip), len(self.act_trans_scales), len(self.act_rot_scales))))
+
+        idx_list = torch.tensor(idx_list, dtype=torch.long, device=device)
+        e_tokens = self.prefix_token_bank(idx_list)
+        e_tokens = e_tokens.view(batch_size, self.peft_num_tokens, self.token_hidden_dim)
 
 
         return e_tokens
