@@ -2,6 +2,7 @@ import logging
 import math
 import dataclasses
 
+import numpy as np
 import typing
 from typing import Tuple
 import torch
@@ -295,7 +296,7 @@ class PI0Pytorch(nn.Module):
         self.use_peft_prefix_token = config.use_peft_prefix_token
         self.peft_num_tokens = config.peft_num_tokens
         self.peft_init = config.peft_init
-        self.token_hidden_dim = self.width
+        self.token_hidden_dim = self.width * self.peft_num_tokens
         
         # Base keys (data sources); default single base
         base_keys = config.base_keys
@@ -333,7 +334,7 @@ class PI0Pytorch(nn.Module):
         self._NO = NO
         self._NA = NA
 
-        self.num_embeddings = self.peft_num_tokens * self._B * self._NO * self._NA
+        self.num_embeddings = self._B * self._NO * self._NA
 
         # prefix token bank
         self.prefix_token_bank = nn.Embedding(
@@ -1282,11 +1283,9 @@ class PI0Pytorch(nn.Module):
         return x_t
 
     @torch.no_grad()
-    def sample_actions_online(self, device, observation, noise=None, num_steps=10, key_idx_list=None) -> Tensor:
+    def sample_actions_online(self, device, observation, noise=None, num_steps=10, base_embodiment_keys=None) -> Tensor:
         """Do a full inference forward and compute the action (batch_size x num_steps x num_motors)"""
-        obs_aug_params = []
-        for key_idx in key_idx_list:
-            obs_aug_params.append(self.embodiment_registry.idx_to_obs_aug_param[key_idx])
+
 
 
         bsize = observation.state.shape[0]
@@ -1394,7 +1393,7 @@ class PI0Pytorch(nn.Module):
 
 
     @ torch.no_grad()
-    def sample_alignment_prediction(self, device, observation, actions, next_observation, num_steps=10, key_idx_list=None):
+    def sample_alignment_prediction(self, device, observation, actions, next_observation, num_steps=10, base_embodiment_keys=None):
         """Full iterative sampling for alignment predictions.
 
         Args:
@@ -1410,25 +1409,28 @@ class PI0Pytorch(nn.Module):
         - 'embodiment_keys': [B]
         """
 
-        embodiment_keys = []
-        obs_aug_params = []
-        act_aug_params = []
-        for key_idx in key_idx_list:
-            embodiment_keys.append(self.embodiment_registry.idx_to_key[key_idx])
-            obs_aug_params.append(self.embodiment_registry.idx_to_obs_aug_param[key_idx])
-            act_aug_params.append(self.embodiment_registry.idx_to_act_aug_param[key_idx])
+        # embodiment_keys = []
+        # obs_aug_params = []
+        # act_aug_params = []
+        # for key_idx in key_idx_list:
+        #     embodiment_keys.append(self.embodiment_registry.idx_to_key[key_idx])
+        #     obs_aug_params.append(self.embodiment_registry.idx_to_obs_aug_param[key_idx])
+        #     act_aug_params.append(self.embodiment_registry.idx_to_act_aug_param[key_idx])
 
         bsize = observation.state.shape[0]
 
 
         # Preprocess observation and build prefix cache
-        (images, img_masks, lang_tokens, lang_masks, state) = self._preprocess_observation(
-            observation, train=True, use_aug_params=obs_aug_params
+        (images, img_masks, lang_tokens, lang_masks, state), obs_aug_metadata = self._preprocess_observation(
+            observation, train=True, return_aug_params=True
         )
 
         (images_next, img_masks_next, lang_tokens_next, lang_masks_next, state_next) = self._preprocess_observation(
-            next_observation, train=True, use_aug_params=obs_aug_params
+            next_observation, train=True, use_aug_params=obs_aug_metadata.get('params')
         )
+
+        # Action augmentation: grouped scale via preprocessing util
+        actions, act_aug_metadata = self._preprocess_actions(actions, return_aug_params=True)
 
         # Use first camera view for next observation features
         next_obs_features = self.paligemma_with_expert.embed_image(images_next[0])
@@ -1444,7 +1446,7 @@ class PI0Pytorch(nn.Module):
 
         # Optionally prepend PEFT E-Token from Token Bank to prefix
         if getattr(self, 'use_peft_prefix_token', False) and self.prefix_token_bank is not None:
-            e_tok = self.prefix_token_bank(torch.tensor(key_idx_list, dtype=torch.long,device=device))[:,None,:]
+            e_tok = self.get_embodiment_token(base_embodiment_keys, obs_aug_metadata, act_aug_metadata)
             prefix_embs = torch.cat([prefix_embs, e_tok], dim=1)
             # pad mask: all ones for added tokens
             prefix_pad_masks = torch.cat(
