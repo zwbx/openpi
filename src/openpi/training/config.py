@@ -810,7 +810,14 @@ _CONFIGS = [
             discrete_state_input=False,
             use_alignment_expert=True,
             use_peft_prefix_token=True,
-            peft_token_bank_size=1024,
+            # Predefined discrete augmentation options for composite-id prefix
+            base_keys=None,  # use dataloader-provided keys; default to ['default'] if unknown
+            obs_crop_scales=[0.90, 1.00, 1.10],
+            obs_crop_pos=["C", "U", "D", "L", "R"],
+            obs_rot_degs=[-10.0, 0.0, 10.0],
+            obs_flip=[0],
+            act_trans_scales=[0.8, 1.0, 1.2],
+            act_rot_scales=[0.8, 1.0, 1.2],
             restrict_image_to_language=False,
             pi05=True
         ),
@@ -867,7 +874,14 @@ _CONFIGS = [
             discrete_state_input=False,
             use_alignment_expert=True,
             use_peft_prefix_token=True,
-            peft_token_bank_size=1024,
+            # Predefined discrete augmentation options for composite-id prefix
+            base_keys=None,
+            obs_crop_scales=[0.90, 1.00, 1.10],
+            obs_crop_pos=["C", "U", "D", "L", "R"],
+            obs_rot_degs=[-10.0, 0.0, 10.0],
+            obs_flip=[0],
+            act_trans_scales=[0.8, 1.0, 1.2],
+            act_rot_scales=[0.8, 1.0, 1.2],
             restrict_image_to_language=False,
         ),
         data=LeRobotSimplerDataConfig(

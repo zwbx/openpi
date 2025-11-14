@@ -8,6 +8,7 @@ import torch
 from torch import Tensor
 from torch import nn
 import torch.nn.functional as F  # noqa: N812
+import torch.distributed as dist
 
 import openpi.models.gemma as _gemma
 from openpi.models_pytorch.gemma_pytorch import PaliGemmaWithExpertModel
@@ -236,42 +237,7 @@ class PI0Pytorch(nn.Module):
         self.rgb_feat_in_proj = nn.Linear(self.width, alignment_expert_config.width)
         self.rgb_out_proj = nn.Linear(alignment_expert_config.width, 3*196)
 
-        # PEFT prefix token bank (E-Token Bank) using nn.Embedding
-        self.use_peft_prefix_token = bool(getattr(config, 'use_peft_prefix_token', False))
-        self.peft_num_tokens = int(getattr(config, 'peft_num_tokens', 1)) if self.use_peft_prefix_token else 0
-        self.peft_token_bank_size = int(getattr(config, 'peft_token_bank_size', 32)) if self.use_peft_prefix_token else 0
-        self.peft_init = getattr(config, 'peft_init', 'zeros')
-
-        if self.use_peft_prefix_token and self.peft_num_tokens > 0:
-            # Initialize token bank using nn.Embedding
-            # num_embeddings: bank_size (max number of embodiments)
-            # embedding_dim: num_tokens * hidden_dim (flattened)
-            self.prefix_token_bank = nn.Embedding(
-                num_embeddings=self.peft_token_bank_size,
-                embedding_dim=paligemma_config.width
-            )
-
-            # Initialize weights
-            if self.peft_init == 'normal':
-                nn.init.normal_(self.prefix_token_bank.weight, mean=0.0, std=0.02)
-            else:  # 'zeros'
-                nn.init.zeros_(self.prefix_token_bank.weight)
-
-            # Store shape info for reshaping
-            self.token_hidden_dim = paligemma_config.width
-
-            # Initialize Embodiment Registry
-            embodiment_mode = getattr(config, 'embodiment_registry_mode', 'auto')
-            self.embodiment_registry = EmbodimentRegistry(mode=embodiment_mode)
-
-            # Load pre-registered embodiments if path provided
-            embodiment_path = getattr(config, 'embodiment_registry_path', None)
-            if embodiment_path is not None:
-                self.embodiment_registry.load(embodiment_path)
-                logging.info(f"Loaded embodiment registry: {len(self.embodiment_registry)} embeddings")
-        else:
-            self.prefix_token_bank = None
-            self.embodiment_registry = None
+        self.init_prefix_token_bank(config)
 
         # Alignment expert prediction heads (if enabled)
         if use_alignment_expert:
@@ -321,6 +287,79 @@ class PI0Pytorch(nn.Module):
         except ImportError:
             raise ValueError(msg) from None
 
+
+    def init_prefix_token_bank(self, config):
+        # Composite-id based prefix: compute capacity from config (base × obs_aug × act_aug)
+        if self.use_peft_prefix_token and self.peft_num_tokens > 0:
+
+            # PEFT prefix token bank (E-Token Bank) using nn.Embedding
+            self.use_peft_prefix_token = config.use_peft_prefix_token
+            self.peft_num_tokens = config.peft_num_tokens
+            self.peft_init = config.peft_init
+            self.token_hidden_dim = self.paligemma_with_expert.paligemma.config.width
+            
+            # Base keys (data sources); default single base
+            base_keys = config.base_keys
+            if base_keys is None:
+                base_keys = ['default']
+            self.base_keys: list[str] = list(base_keys)
+            self.base_key_to_id = {k: i for i, k in enumerate(self.base_keys)}
+            B = len(self.base_keys)
+
+            # Observation augmentation discrete options (deterministic order)
+            self.obs_crop_scales = list(getattr(config, 'obs_crop_scales', list(_preprocessing._CROP_SCALES)))
+            self.obs_crop_pos = list(getattr(config, 'obs_crop_pos', list(_preprocessing._CROP_POS)))
+            self.obs_rot_degs = list(getattr(config, 'obs_rot_degs', list(_preprocessing._ROT_DEGS)))
+            self.obs_flip = list(getattr(config, 'obs_flip', list(_preprocessing._FLIP)))
+            # Color preset currently fixed to 0 in forced pipeline
+
+            # Action augmentation discrete options
+            self.act_trans_scales = list(getattr(config, 'act_trans_scales', list(_preprocessing._ACTION_TRANS_SCALES)))
+            self.act_rot_scales = list(getattr(config, 'act_rot_scales', list(_preprocessing._ACTION_ROT_SCALES)))
+
+            # Sizes and total capacity
+            self._n_cs = len(self.obs_crop_scales)
+            self._n_pos = len(self.obs_crop_pos)
+            self._n_rot = len(self.obs_rot_degs)
+            self._n_flip = len(self.obs_flip)
+            NO = self._n_cs * self._n_pos * self._n_rot * self._n_flip
+            self._n_t = len(self.act_trans_scales)
+            self._n_r = len(self.act_rot_scales)
+            NA = self._n_t * self._n_r
+
+            if NO <= 0 or NA <= 0 or B <= 0:
+                raise ValueError(f"Invalid prefix capacity: B={B}, NO={NO}, NA={NA}")
+
+            self._B = B
+            self._NO = NO
+            self._NA = NA
+
+            self.num_embeddings = self.peft_num_tokens * self._B * self._NO * self._NA
+
+            # prefix token bank
+            self.prefix_token_bank = nn.Embedding(
+                num_embeddings=self.num_embeddings,
+                embedding_dim=self.token_hidden_dim,
+            )
+
+            # Initialize weights
+            if self.peft_init == 'normal':
+                nn.init.normal_(self.prefix_token_bank.weight, mean=0.0, std=0.02)
+            else:  # 'zeros'
+                nn.init.zeros_(self.prefix_token_bank.weight)
+
+
+            # create idx_to_obs_aug_param and idx_to_act_aug_param
+            self.idx_to_obs_aug_param = {}
+            self.idx_to_act_aug_param = {}
+            for i in range(self._n_cs):
+                self.idx_to_obs_aug_param[i] = self.obs_crop_scales[i]
+            for i in range(self._n_t):
+                self.idx_to_act_aug_param[i] = self.act_trans_scales[i]
+            for i in range(self._n_r):
+                self.idx_to_act_aug_param[i] = self.act_rot_scales[i]
+
+
     def _vision_grid_size(self) -> int:
         """Derive vision token grid size g from vision config (image_size // patch_size).
 
@@ -338,34 +377,37 @@ class PI0Pytorch(nn.Module):
             return 14
 
 
-    def get_embodiment_token(self, base_embodiment_keys, obs_aug_metadata, act_aug_metadata, batch_size: int):
+    def get_embodiment_token(self, base_embodiment_keys, obs_aug_metadata, act_aug_metadata):
         """
-        根据 embodiment key 获取对应的 E-Token
+        随机取num数组，然后根据num数组取出对应的 E-Token。
+        同时得到aug options keys用于后续的action和observation augmentation。
 
         Args:
-            base_embodiment_keys: base embodiment keys
-            obs_aug_metadata: observation augmentation metadata
-            act_aug_metadata: action augmentation metadata
-            batch_size: batch size
+            base_embodiment_keys: List[str] | None, 每个样本的数据来源/本体 key
+
 
         Returns:
             e_token: [batch_size, num_tokens, hidden_dim]
+            obs_aug_keys: List[str] | None, 每个样本的 obs 选项 key
+            act_aug_keys: List[str] | None, 每个样本的 act 选项 key
+
         """
-        embodiment_keys = _preprocessing.build_embodiment_keys(base_embodiment_keys, obs_aug_metadata, act_aug_metadata)
+        device = self.prefix_token_bank.weight.device
+        batch_size = len(base_embodiment_keys)
 
-        # 获取每个样本的 embodiment ID
-        embodiment_ids = []
-        for key, obs_aug_param, act_aug_param in zip(embodiment_keys, obs_aug_metadata['params'], act_aug_metadata['params']):
-            # 直接使用 key 注册或获取 embodiment ID
-            embodiment_id = self.embodiment_registry.get_or_register(key, obs_aug_param, act_aug_param)
-            embodiment_ids.append(embodiment_id)
+        idx_ravel = (1,self.obs_crop_scales,self.obs_crop_pos,self.obs_rot_degs,self.obs_flip,self.act_trans_scales,self.act_rot_scales)
+        
 
-        # 从 nn.Embedding 中查询 tokens
-        embodiment_ids = torch.tensor(embodiment_ids, dtype=torch.long, device=self.prefix_token_bank.weight.device)
-        e_tokens_flat = self.prefix_token_bank(embodiment_ids)  # [batch_size, num_tokens * hidden_dim]
+        random_flat_idx = torch.randint(0, self.num_embeddings, (batch_size,), device=device)
+        e_tokens = self.prefix_token_bank(random_flat_idx)
 
-        # Reshape to [batch_size, num_tokens, hidden_dim]
-        e_tokens = e_tokens_flat.view(batch_size, self.peft_num_tokens, self.token_hidden_dim)
+        obs_aug_keys = []
+        act_aug_keys = []
+        for i in range(batch_size):
+            obs_aug_keys.append(self.obs_crop_scales[random_flat_idx[i] % self._n_cs])
+            act_aug_keys.append(self.act_trans_scales[random_flat_idx[i] % self._n_t])
+            act_aug_keys.append(self.act_rot_scales[random_flat_idx[i] % self._n_r])
+
 
         return e_tokens
 
@@ -406,14 +448,19 @@ class PI0Pytorch(nn.Module):
         att_2d_masks_4d = att_2d_masks[:, None, :, :]
         return torch.where(att_2d_masks_4d, 0.0, -2.3819763e38)
 
-    def _preprocess_actions(self, actions, *, return_aug_params=False):
+    def _preprocess_actions(self, actions, *, return_aug_params=False, use_params=None):
         """Helper method to preprocess actions.
 
         Args:
             actions: Input actions
             return_aug_params: If True, return augmentation parameters from Kornia
         """
-        return _preprocessing.preprocess_actions_pytorch(actions, return_aug_params=return_aug_params, action_aug_prob=self.config.action_aug_prob)
+        return _preprocessing.preprocess_actions_pytorch(
+            actions,
+            return_aug_params=return_aug_params,
+            action_aug_prob=self.config.action_aug_prob,
+            use_params=use_params,
+        )
 
 
     def _preprocess_observation(self, observation, *, train=True, return_aug_params=False, use_aug_params=None):
@@ -432,12 +479,20 @@ class PI0Pytorch(nn.Module):
         """
         # Read observation augmentation probability from config only
         obs_prob = float(getattr(self.config, 'obs_aug_prob', 1.0))
+        # Pass discrete options from config so sampling uses config ranges when needed
+        discrete_options = {
+            "crop_scales": getattr(self, 'obs_crop_scales', None) or list(_preprocessing._CROP_SCALES),
+            "crop_pos": getattr(self, 'obs_crop_pos', None) or list(_preprocessing._CROP_POS),
+            "rot_degs": getattr(self, 'obs_rot_degs', None) or list(_preprocessing._ROT_DEGS),
+            "flip": getattr(self, 'obs_flip', None) or list(_preprocessing._FLIP),
+        }
         result = _preprocessing.preprocess_observation_pytorch(
             observation,
             train=train,
             return_aug_params=return_aug_params,
             aug_enable_prob=obs_prob,
             use_aug_params=use_aug_params,
+            discrete_options=discrete_options,
         )
 
         if return_aug_params:

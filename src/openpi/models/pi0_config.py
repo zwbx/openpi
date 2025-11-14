@@ -82,6 +82,17 @@ class Pi0Config(_model.BaseModelConfig):
     # Probability to enable per-sample observation augmentation
     obs_aug_prob: float = 0.5
 
+    # Discrete augmentation options (PyTorch path). If None, defaults are used
+    # Observation geometry augmentation options
+    base_keys: list[str] | None = None  # Data source/embodiment base keys
+    obs_crop_scales: list[float] | None = None
+    obs_crop_pos: list[str] | None = None
+    obs_rot_degs: list[float] | None = None
+    obs_flip: list[int] | None = None
+    # Action augmentation options (grouped scales)
+    act_trans_scales: list[float] | None = None
+    act_rot_scales: list[float] | None = None
+
 
 
     # Attention restriction configuration
