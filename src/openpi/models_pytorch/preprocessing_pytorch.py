@@ -24,7 +24,7 @@ IMAGE_RESOLUTION = (224, 224)
 # 离散参数定义（有限集合，1:1 可复现）
 ############################################
 
-_CROP_SCALES = (0,0.90,1.1)
+_CROP_SCALES = (1.0,0.90,1.1)
 _CROP_POS = ("C", "U", "D", "L", "R")  # Center / Up / Down / Left / Right
 _ROT_DEGS = (0.0, -10.0, 10.0)
 # _FLIP = (0, 1)
