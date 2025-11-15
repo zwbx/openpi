@@ -710,9 +710,9 @@ def train_loop(config: _config.TrainConfig):
                         batch_size = observation.images[next(iter(observation.images.keys()))].shape[0]
                         # Handle DDP wrapper - access module if model is wrapped
                         model_for_attr = model.module if hasattr(model, 'module') else model
-                        key_idx_list = [random.randint(0, model_for_attr.num_embeddings - 1) for _ in range(batch_size)]
+                        # key_idx_list = [random.randint(0, model_for_attr.num_embeddings - 1) for _ in range(batch_size)]
                         alignment_preds = model.sample_alignment_prediction(
-                            device, observation, actions, next_obs, num_steps=10, key_idx_list=key_idx_list
+                            device, observation, actions, next_obs, num_steps=10, base_embodiment_keys=base_embodiment_keys
                         )
                         # action_preds = model.sample_actions_online(
                         #     device, observation, noise=None, num_steps=10, key_idx_list=key_idx_list

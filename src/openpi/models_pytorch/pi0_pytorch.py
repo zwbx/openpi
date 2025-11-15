@@ -14,7 +14,7 @@ import torch.distributed as dist
 import openpi.models.gemma as _gemma
 from openpi.models_pytorch.gemma_pytorch import PaliGemmaWithExpertModel
 import openpi.models_pytorch.preprocessing_pytorch as _preprocessing
-from openpi.shared.embodiment_config import EmbodimentRegistry, BaseEmbodimentConfig, EmbodimentKey
+from openpi.shared.embodiment_config import EmbodimentRegistry, BaseEmbodimentConfig, EmbodimentKey, PrefixTokenBank
 import random
 import time
 import numpy
@@ -238,7 +238,13 @@ class PI0Pytorch(nn.Module):
         self.rgb_feat_in_proj = nn.Linear(self.width, alignment_expert_config.width)
         self.rgb_out_proj = nn.Linear(alignment_expert_config.width, 3*196)
 
-        self.init_prefix_token_bank(config)
+        # Initialize PEFT prefix token bank using PrefixTokenBank class
+        self.prefix_token_bank = PrefixTokenBank(config, width=self.width)
+
+        # Keep references to frequently used attributes for convenience
+        self.use_peft_prefix_token = self.prefix_token_bank.use_peft_prefix_token
+        self.peft_num_tokens = self.prefix_token_bank.peft_num_tokens
+        self.token_hidden_dim = self.prefix_token_bank.token_hidden_dim
 
         # Alignment expert prediction heads (if enabled)
         if use_alignment_expert:
@@ -289,64 +295,6 @@ class PI0Pytorch(nn.Module):
             raise ValueError(msg) from None
 
 
-    def init_prefix_token_bank(self, config):
-        # Composite-id based prefix: compute capacity from config (base × obs_aug × act_aug)
-
-        # PEFT prefix token bank (E-Token Bank) using nn.Embedding
-        self.use_peft_prefix_token = config.use_peft_prefix_token
-        self.peft_num_tokens = config.peft_num_tokens
-        self.peft_init = config.peft_init
-        self.token_hidden_dim = self.width * self.peft_num_tokens
-        
-        # Base keys (data sources); default single base
-        base_keys = config.base_keys
-        if base_keys is None:
-            base_keys = ['default']
-        self.base_keys: list[str] = list(base_keys)
-        self.base_key_to_id = {k: i for i, k in enumerate(self.base_keys)}
-        B = len(self.base_keys)
-
-        # Observation augmentation discrete options (deterministic order)
-        self.obs_crop_scales = list(getattr(config, 'obs_crop_scales', list(_preprocessing._CROP_SCALES)))
-        self.obs_crop_pos = list(getattr(config, 'obs_crop_pos', list(_preprocessing._CROP_POS)))
-        self.obs_rot_degs = list(getattr(config, 'obs_rot_degs', list(_preprocessing._ROT_DEGS)))
-        self.obs_flip = list(getattr(config, 'obs_flip', list(_preprocessing._FLIP)))
-        # Color preset currently fixed to 0 in forced pipeline
-
-        # Action augmentation discrete options
-        self.act_trans_scales = list(getattr(config, 'act_trans_scales', list(_preprocessing._ACTION_TRANS_SCALES)))
-        self.act_rot_scales = list(getattr(config, 'act_rot_scales', list(_preprocessing._ACTION_ROT_SCALES)))
-
-        # Sizes and total capacity
-        self._n_cs = len(self.obs_crop_scales)
-        self._n_pos = len(self.obs_crop_pos)
-        self._n_rot = len(self.obs_rot_degs)
-        self._n_flip = len(self.obs_flip)
-        NO = self._n_cs * self._n_pos * self._n_rot * self._n_flip
-        self._n_t = len(self.act_trans_scales)
-        self._n_r = len(self.act_rot_scales)
-        NA = self._n_t * self._n_r
-
-        if NO <= 0 or NA <= 0 or B <= 0:
-            raise ValueError(f"Invalid prefix capacity: B={B}, NO={NO}, NA={NA}")
-
-        self._B = B
-        self._NO = NO
-        self._NA = NA
-
-        self.num_embeddings = self._B * self._NO * self._NA
-
-        # prefix token bank
-        self.prefix_token_bank = nn.Embedding(
-            num_embeddings=self.num_embeddings,
-            embedding_dim=self.token_hidden_dim,
-        )
-
-        # Initialize weights
-        if self.peft_init == 'normal':
-            nn.init.normal_(self.prefix_token_bank.weight, mean=0.0, std=0.02)
-        else:  # 'zeros'
-            nn.init.zeros_(self.prefix_token_bank.weight)
 
 
     def _vision_grid_size(self) -> int:
@@ -381,30 +329,10 @@ class PI0Pytorch(nn.Module):
             act_aug_keys: List[str] | None, 每个样本的 act 选项 key
 
         """
-        from .preprocessing_pytorch import _CROP_SCALES, _CROP_POS, _ROT_DEGS, _FLIP, _ACTION_TRANS_SCALES, _ACTION_ROT_SCALES
-
-        device = self.prefix_token_bank.weight.device
-        batch_size = len(base_embodiment_keys)
-
-        idx_list = []
-        for i in range(batch_size):
-            crop_scale = obs_aug_metadata['params'][i]['base_0_rgb']['crop_scale']
-            crop_pos = obs_aug_metadata['params'][i]['base_0_rgb']['crop_pos']
-            rotation_deg = obs_aug_metadata['params'][i]['base_0_rgb']['rotation_deg']
-            flip = obs_aug_metadata['params'][i]['base_0_rgb']['flip']
-            transition = act_aug_metadata['params'][i]['action']['transition']
-            rotation = act_aug_metadata['params'][i]['action']['rotation']
-            idx = (_CROP_SCALES.index(crop_scale), _CROP_POS.index(crop_pos), _ROT_DEGS.index(rotation_deg), _FLIP.index(flip), _ACTION_TRANS_SCALES.index(transition), _ACTION_ROT_SCALES.index(rotation))
-            idx = np.array(idx)
-            idx = np.ravel_multi_index(idx, (len(_CROP_SCALES), len(_CROP_POS), len(_ROT_DEGS), len(_FLIP), len(_ACTION_TRANS_SCALES), len(_ACTION_ROT_SCALES)))
-            idx_list.append(idx)
-
-        idx_list = torch.tensor(idx_list, device=device)
-        e_tokens = self.prefix_token_bank(idx_list)
-        e_tokens = e_tokens.view(batch_size, self.peft_num_tokens, self.token_hidden_dim)
-
-
-        return e_tokens
+        # Delegate to PrefixTokenBank class
+        return self.prefix_token_bank.get_embodiment_token(
+            base_embodiment_keys, obs_aug_metadata, act_aug_metadata
+        )
 
     def gradient_checkpointing_enable(self):
         """Enable gradient checkpointing for memory optimization."""
@@ -901,7 +829,7 @@ class PI0Pytorch(nn.Module):
         # add prefix embodiment token
         if self.use_peft_prefix_token:
             batch_size = actions.shape[0]
-            e_tok = self.get_embodiment_token(base_embodiment_keys, obs_aug_metadata, act_aug_metadata)
+            e_tok = self.get_embodiment_token(base_embodiment_keys, obs_aug_metadata, act_aug_metadata).to(prefix_embs.device)
             prefix_embs = torch.cat([prefix_embs,e_tok], dim=1)
             prefix_pad_masks = torch.cat([prefix_pad_masks, torch.ones(batch_size, e_tok.shape[1], dtype=torch.bool, device=actions.device)], dim=1)
             # for prefix_att_masks
@@ -1109,7 +1037,7 @@ class PI0Pytorch(nn.Module):
 
         params_to_opt = []
         if update_peft_token and getattr(self, 'use_peft_prefix_token', False) and self.prefix_token_bank is not None:
-            params_to_opt.append(self.prefix_token_bank.weight)
+            params_to_opt.append(self.prefix_token_bank.prefix_token_bank.weight)
 
         if len(params_to_opt) == 0:
             logging.warning("No E-Token Bank parameters available for alignment. Skipping align.")
@@ -1214,7 +1142,7 @@ class PI0Pytorch(nn.Module):
 
         # Optionally prepend PEFT E-Token from Token Bank to prefix
         if getattr(self, 'use_peft_prefix_token', False) and self.prefix_token_bank is not None:
-            e_tok = self.prefix_token_bank(torch.zeros(bsize, dtype=torch.long,device=device))[:,None,:]
+            e_tok = self.prefix_token_bank.prefix_token_bank(torch.zeros(bsize, dtype=torch.long,device=device))[:,None,:]
             prefix_embs = torch.cat([prefix_embs, e_tok], dim=1)
             # pad mask: all ones for added tokens
             prefix_pad_masks = torch.cat(
@@ -1300,7 +1228,7 @@ class PI0Pytorch(nn.Module):
 
         # Optionally prepend PEFT E-Token from Token Bank to prefix
         if getattr(self, 'use_peft_prefix_token', False) and self.prefix_token_bank is not None:
-            e_tok = self.prefix_token_bank(torch.tensor(key_idx_list, dtype=torch.long,device=device))[:,None,:]
+            e_tok = self.prefix_token_bank.prefix_token_bank(torch.tensor(key_idx_list, dtype=torch.long,device=device))[:,None,:]
             prefix_embs = torch.cat([prefix_embs, e_tok], dim=1)
             # pad mask: all ones for added tokens
             prefix_pad_masks = torch.cat(
@@ -1432,6 +1360,10 @@ class PI0Pytorch(nn.Module):
         # Action augmentation: grouped scale via preprocessing util
         actions, act_aug_metadata = self._preprocess_actions(actions, return_aug_params=True)
 
+        embodiment_keys = self.prefix_token_bank.build_embodiment_keys(
+            base_embodiment_keys, obs_aug_metadata, act_aug_metadata
+        )
+
         # Use first camera view for next observation features
         next_obs_features = self.paligemma_with_expert.embed_image(images_next[0])
 
@@ -1446,7 +1378,7 @@ class PI0Pytorch(nn.Module):
 
         # Optionally prepend PEFT E-Token from Token Bank to prefix
         if getattr(self, 'use_peft_prefix_token', False) and self.prefix_token_bank is not None:
-            e_tok = self.get_embodiment_token(base_embodiment_keys, obs_aug_metadata, act_aug_metadata)
+            e_tok = self.get_embodiment_token(base_embodiment_keys, obs_aug_metadata, act_aug_metadata).to(device)
             prefix_embs = torch.cat([prefix_embs, e_tok], dim=1)
             # pad mask: all ones for added tokens
             prefix_pad_masks = torch.cat(

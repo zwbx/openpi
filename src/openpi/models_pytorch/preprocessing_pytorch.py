@@ -196,39 +196,39 @@ def _format_geom_key(scale: float, pos_idx: int, rot_deg: float, flip: int) -> s
     return f"crop=s{scale:.2f}@{pos_letter}|rot={int(rot_deg):+d}|flip={flip}"
 
 
-def build_embodiment_keys(base_keys: list[tuple], obs_aug_metadata: dict, act_aug_metadata: dict | None = None):
-    """Build final embodiment_keys by appending augmentation key per sample.
+# def build_embodiment_keys(base_keys: list[tuple], obs_aug_metadata: dict, act_aug_metadata: dict | None = None):
+#     """Build final embodiment_keys by appending augmentation key per sample.
 
-    Requirements:
-    - base_keys must be a list of tuples, length == batch size.
-    - obs_aug_metadata["keys"]: list[str], non-wrist geometric parts concatenated and sorted by view
-    - act_aug_metadata["keys"]: list[str], e.g., "act_sc=1"
-    """
-    img_keys = obs_aug_metadata.get("keys", []) if isinstance(obs_aug_metadata, dict) else []
-    act_keys = act_aug_metadata.get("keys", []) if isinstance(act_aug_metadata, dict) else []
-    batch_size = len(img_keys) if img_keys else (len(act_keys) if act_keys else 0)
+#     Requirements:
+#     - base_keys must be a list of tuples, length == batch size.
+#     - obs_aug_metadata["keys"]: list[str], non-wrist geometric parts concatenated and sorted by view
+#     - act_aug_metadata["keys"]: list[str], e.g., "act_sc=1"
+#     """
+#     img_keys = obs_aug_metadata.get("keys", []) if isinstance(obs_aug_metadata, dict) else []
+#     act_keys = act_aug_metadata.get("keys", []) if isinstance(act_aug_metadata, dict) else []
+#     batch_size = len(img_keys) if img_keys else (len(act_keys) if act_keys else 0)
 
-    if not isinstance(base_keys, list):
-        raise TypeError("base_keys must be a list of tuples with length == batch size")
-    if len(base_keys) != batch_size:
-        raise ValueError(f"embodiment_keys length {len(base_keys)} != batch_size {batch_size}")
-    for i, bk in enumerate(base_keys):
-        if not isinstance(bk, tuple):
-            raise TypeError(f"base_keys[{i}] must be a tuple, got {type(bk)}")
+#     if not isinstance(base_keys, list):
+#         raise TypeError("base_keys must be a list of tuples with length == batch size")
+#     if len(base_keys) != batch_size:
+#         raise ValueError(f"embodiment_keys length {len(base_keys)} != batch_size {batch_size}")
+#     for i, bk in enumerate(base_keys):
+#         if not isinstance(bk, tuple):
+#             raise TypeError(f"base_keys[{i}] must be a tuple, got {type(bk)}")
 
-    final_keys = []
-    for i in range(batch_size):
-        parts = []
-        if img_keys:
-            parts.append(img_keys[i])
-        if act_keys:
-            parts.append(act_keys[i])
-        aug_key = "|".join([p for p in parts if p]) if parts else ""
-        final_keys.append(base_keys[i] + (aug_key,))
-    return final_keys
+#     final_keys = []
+#     for i in range(batch_size):
+#         parts = []
+#         if img_keys:
+#             parts.append(img_keys[i])
+#         if act_keys:
+#             parts.append(act_keys[i])
+#         aug_key = "|".join([p for p in parts if p]) if parts else ""
+#         final_keys.append(base_keys[i] + (aug_key,))
+#     return final_keys
 
 
-# 以上定义用于“参数驱动 + 函数式变换”的离散增广，不再依赖 Kornia 的随机管线
+# # 以上定义用于“参数驱动 + 函数式变换”的离散增广，不再依赖 Kornia 的随机管线
 
 
 def preprocess_observation_pytorch(
@@ -604,67 +604,68 @@ def preprocess_actions_pytorch(
     return actions_out, {"params": params, "key_suffixes": suffixes}
 
 
-def build_embodiment_keys(
-    base_keys,
-    obs_aug_metadata: dict | None,
-    act_aug_metadata: dict | None,
-    *,
-    join_with: str = "_",
-    act_sep: str = "|",
-) -> list[str]:
-    """Merge base keys, observation aug keys, and action aug suffixes into final embodiment keys.
+# def build_embodiment_keys(
+#     base_keys,
+#     obs_aug_metadata: dict | None,
+#     act_aug_metadata: dict | None,
+#     *,
+#     join_with: str = "_",
+#     act_sep: str = "|",
+# ) -> list[str]:
+#     """Merge base keys, observation aug keys, and action aug suffixes into final embodiment keys.
 
-    - base_keys: list/iterable of per-sample base keys, a single key, or None
-    - obs_aug_metadata: expects {'keys': List[str]}
-    - act_aug_metadata: expects {'key_suffixes': List[str]}
-    """
-    obs_keys = None
-    if isinstance(obs_aug_metadata, dict):
-        obs_keys = obs_aug_metadata.get("keys")
+#     - base_keys: list/iterable of per-sample base keys, a single key, or None
+#     - obs_aug_metadata: expects {'keys': List[str]}
+#     - act_aug_metadata: expects {'key_suffixes': List[str]}
+#     """
+#     obs_keys = None
+#     if isinstance(obs_aug_metadata, dict):
+#         obs_keys = obs_aug_metadata.get("keys")
 
-    act_suffixes = None
-    if isinstance(act_aug_metadata, dict):
-        act_suffixes = act_aug_metadata.get("key_suffixes")
+#     act_suffixes = None
+#     if isinstance(act_aug_metadata, dict):
+#         act_suffixes = act_aug_metadata.get("key_suffixes")
 
-    # Determine batch size
-    b = None
-    if isinstance(obs_keys, list):
-        b = len(obs_keys)
-    elif isinstance(act_suffixes, list):
-        b = len(act_suffixes)
-    elif isinstance(base_keys, list):
-        b = len(base_keys)
-    if b is None:
-        raise ValueError("Cannot infer batch size for building embodiment keys")
+#     # Determine batch size
+#     b = None
+#     if isinstance(obs_keys, list):
+#         b = len(obs_keys)
+#     elif isinstance(act_suffixes, list):
+#         b = len(act_suffixes)
+#     elif isinstance(base_keys, list):
+#         b = len(base_keys)
+#     if b is None:
+#         raise ValueError("Cannot infer batch size for building embodiment keys")
 
-    # Normalize inputs to lists of strings
-    def to_list(x, n):
-        if x is None:
-            return [""] * n
-        if isinstance(x, list):
-            return [str(v) for v in x]
-        # single scalar -> repeat
-        return [str(x)] * n
+#     # Normalize inputs to lists of strings
+#     def to_list(x, n):
+#         if x is None:
+#             return [""] * n
+#         if isinstance(x, list):
+#             return [str(v) for v in x]
+#         # single scalar -> repeat
+#         return [str(x)] * n
 
-    base_list = to_list(base_keys, b)
-    obs_list = to_list(obs_keys, b)
-    act_list = to_list(act_suffixes, b)
+#     base_list = to_list(base_keys, b)
+#     obs_list = to_list(obs_keys, b)
+#     act_list = to_list(act_suffixes, b)
 
-    # Build per-sample augmentation key (obs + action suffix)
-    aug_list = []
-    for o, a in zip(obs_list, act_list, strict=True):
-        if a:
-            aug_list.append(f"{o}{act_sep}{a}" if o else a)
-        else:
-            aug_list.append(o)
+#     # Build per-sample augmentation key (obs + action suffix)
+#     aug_list = []
+#     for o, a in zip(obs_list, act_list, strict=True):
+#         if a:
+#             aug_list.append(f"{o}{act_sep}{a}" if o else a)
+#         else:
+#             aug_list.append(o)
 
-    # Combine base with augmentation key
-    final = []
-    for base, aug in zip(base_list, aug_list, strict=True):
-        if base and aug:
-            final.append(join_with.join((base, aug)))
-        elif base:
-            final.append(base)
-        else:
-            final.append(aug)
-    return final
+#     # Combine base with augmentation key
+#     final = []
+#     for base, aug in zip(base_list, aug_list, strict=True):
+#         if base and aug:
+#             final.append(join_with.join((base, aug)))
+#         elif base:
+#             final.append(base)
+#         else:
+#             final.append(aug)
+#     return final
+

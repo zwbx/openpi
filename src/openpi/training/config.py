@@ -546,6 +546,8 @@ class TrainConfig:
 
     # How often (in steps) to log training metrics.
     log_interval: int = 100
+    # Visualization logging interval (in steps). 0 disables visual logging.
+    visual_log_interval: int = 1000
     # How often (in steps) to save checkpoints.
     save_interval: int = 1000
     # If set, any existing checkpoints matching step % keep_period == 0 will not be deleted.
@@ -559,8 +561,7 @@ class TrainConfig:
     # If true, will enable wandb logging.
     wandb_enabled: bool = True
 
-    # Visualization logging interval (in steps). 0 disables visual logging.
-    visual_log_interval: int = 1000
+
     # Number of samples to log per visualization step.
     visual_num_samples: int = 5
 
@@ -810,14 +811,7 @@ _CONFIGS = [
             discrete_state_input=False,
             use_alignment_expert=True,
             use_peft_prefix_token=True,
-            # Predefined discrete augmentation options for composite-id prefix
-            base_keys=None,  # use dataloader-provided keys; default to ['default'] if unknown
-            obs_crop_scales=[0.90, 1.00, 1.10],
-            obs_crop_pos=["C", "U", "D", "L", "R"],
-            obs_rot_degs=[-10.0, 0.0, 10.0],
-            obs_flip=[0],
-            act_trans_scales=[0.8, 1.0, 1.2],
-            act_rot_scales=[0.8, 1.0, 1.2],
+            peft_token_bank_size=1024,
             restrict_image_to_language=False,
             pi05=True
         ),
@@ -874,14 +868,7 @@ _CONFIGS = [
             discrete_state_input=False,
             use_alignment_expert=True,
             use_peft_prefix_token=True,
-            # Predefined discrete augmentation options for composite-id prefix
-            base_keys=None,
-            obs_crop_scales=[0.90, 1.00, 1.10],
-            obs_crop_pos=["C", "U", "D", "L", "R"],
-            obs_rot_degs=[-10.0, 0.0, 10.0],
-            obs_flip=[0],
-            act_trans_scales=[0.8, 1.0, 1.2],
-            act_rot_scales=[0.8, 1.0, 1.2],
+            peft_token_bank_size=1024,
             restrict_image_to_language=False,
         ),
         data=LeRobotSimplerDataConfig(
@@ -893,7 +880,7 @@ _CONFIGS = [
                 max_num_episodes=1000,
             ),
         ),
-        batch_size=64,
+        batch_size=16,
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=1_000,
             peak_lr=5e-5,
@@ -903,6 +890,8 @@ _CONFIGS = [
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         ema_decay=0.999,
         pytorch_weight_path="/dev/shm/pi05_base_pytorch",
+        wandb_enabled=True,
+        visual_log_interval=100,
         # pytorch_weight_path="/mnt/hdfs/wenbo/vla/pi05_simpler_ckpt/95000/",
         exp_name="pi05_simpler_zscore_align",
         num_train_steps=30_000,
